@@ -1,0 +1,45 @@
+# Mirrors the public EUMETSAT / VLab training-events feed into events.xml in this
+# repository, so the calendar (index.html, PROXY_URL:"events.xml") can read it
+# same-origin on GitHub Pages. GitHub fetches it server-side, so there is no CORS issue.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"    # every 6 hours (UTC). See notes below to change.
+  workflow_dispatch:          # lets you run it manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the EUMETSAT feed
+        run: |
+          curl -fsSL \
+            "https://trainingevents.eumetsat.int/trapi/resources/public/events" \
+            -o events.xml
+          # quick sanity check: file should be non-empty and look like XML
+          test -s events.xml
+          head -c 200 events.xml
+
+      - name: Commit the update (only if it changed)
+        run: |
+          if ! git diff --quiet -- events.xml; then
+            git config user.name  "vlab-calendar-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add events.xml
+            git commit -m "Update events feed"
+            git push
+          else
+            echo "No changes in the feed."
+          fi
+
+# ---------------------------------------------------------------------------
+# To change how often it refreshes, edit the cron line above:
+#   every 3 hours ....... cron: "0 */3 * * *"
+#   once a day 06:00 UTC  cron: "0 6 * * *"
+#   every 12 hours ...... cron: "0 */12 * * *"
+# ---------------------------------------------------------------------------
