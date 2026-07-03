@@ -1,3 +1,5 @@
+name: Update VLab events feed
+
 # Mirrors the public EUMETSAT / VLab training-events feed into events.xml in this
 # repository, so the calendar (index.html, PROXY_URL:"events.xml") can read it
 # same-origin on GitHub Pages. GitHub fetches it server-side, so there is no CORS issue.
@@ -14,7 +16,7 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download the EUMETSAT feed
         run: |
