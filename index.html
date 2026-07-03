@@ -1,0 +1,1326 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  VLab Training Calendar  —  reference widget for the VLab website
+  ============================================================================
+  Adapts the approach developed by the Brazil CoE (INPE).
+  It consumes the PUBLIC EUMETSAT / VLab training events feed (XML):
+      https://trainingevents.eumetsat.int/trapi/resources/public/events
+  ...normalizes each <event>, groups by UTC day/month, renders a month
+  calendar + an upcoming-events list, and exports the visible slice as .ics.
+
+  DEPLOYMENT (important — CORS):
+  Browsers usually cannot fetch the EUMETSAT feed directly (cross-origin).
+  The reference implementation solves this by fetching server-side. For the VLab
+  WordPress site, host the tiny proxy included alongside this file
+  (vlab-eumetsat-proxy.php) on the same domain and point CONFIG.PROXY_URL at
+  it. The widget then loads the feed same-origin — no CORS, plus caching.
+  If neither the proxy nor a direct fetch works, the widget shows clearly
+  labelled sample data so the interface is still reviewable.
+  ============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VLab Training Calendar</title>
+<style>
+  :root{
+    --wmo:#003087; --wmo-2:#0a4bb3; --accent:#0066cc;
+    --ink:#182339; --muted:#5b6b86; --line:#e4eaf3; --bg:#eef3fa; --card:#ffffff;
+    --online:#0a63c9; --online-bg:#e7f0ff; --onsite:#0f7a54; --onsite-bg:#e6f5ee;
+    --today:#0066cc; --shadow:0 1px 2px rgba(16,42,90,.06),0 6px 20px rgba(16,42,90,.06);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;line-height:1.5;}
+  .wrap{max-width:1060px;margin:0 auto;padding:22px 18px 40px;}
+
+  /* Header */
+  .head{position:relative;overflow:hidden;border-radius:18px;padding:26px 28px;color:#fff;box-shadow:var(--shadow);
+    background:linear-gradient(125deg,#001636 0%,#062a74 46%,#0e50c0 100%);}
+  .head .deco{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:280px;height:210px;opacity:.55;pointer-events:none}
+  .head:after{content:"";position:absolute;left:-90px;bottom:-130px;width:280px;height:280px;pointer-events:none;
+    background:radial-gradient(circle at center,rgba(120,170,255,.22),transparent 66%);}
+  .eyebrow{position:relative;display:inline-block;font-size:11px;font-weight:700;letter-spacing:2.2px;text-transform:uppercase;color:#8fb6ff;margin:0 0 8px}
+  .head h1{position:relative;margin:0;font-size:27px;font-weight:800;letter-spacing:.2px;line-height:1.08;}
+  .head p{position:relative;margin:9px 0 0;color:#d7e6ff;font-size:14.5px;line-height:1.5;max-width:54ch;}
+  .sat{flex:0 0 auto}
+  .meta{position:relative;display:flex;flex-wrap:wrap;gap:8px 10px;margin-top:16px;font-size:12px;align-items:center}
+  .meta .chip{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:4px 11px;color:#eaf1ff;display:inline-flex;align-items:center;gap:6px}
+  .meta .chip:empty{display:none}
+  @media(max-width:560px){ .head .deco{opacity:.26;right:-46px;width:200px} .head p{max-width:100%} }
+  .dot-live{width:8px;height:8px;border-radius:50%;background:#4ade80;display:inline-block;margin-right:6px;
+    box-shadow:0 0 0 0 rgba(74,222,128,.7);animation:pulse 2.2s infinite}
+  @keyframes pulse{70%{box-shadow:0 0 0 7px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
+
+  /* Controls */
+  .controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin:18px 2px 12px}
+  .filters{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:10px;padding:3px;box-shadow:var(--shadow)}
+  .filters button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13.5px;font-weight:600;
+    padding:7px 14px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:7px}
+  .filters button[aria-pressed="true"]{background:var(--wmo);color:#fff}
+  .filters{flex-wrap:wrap}
+  .swatch{width:9px;height:9px;border-radius:50%}
+  .filtersets{display:flex;flex-direction:column;gap:8px}
+  .filterrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .flabel{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);min-width:52px}
+  .badge.src{border:1px solid transparent}
+  .badge.coe{background:#e7eeff;color:#003087}
+  .badge.sat{background:#efe9fb;color:#5b3fb0}
+  .badge.par{background:#eef1f5;color:#516079}
+  .lang-select{font:inherit;font-size:13.5px;font-weight:600;color:var(--wmo);background:#fff;border:1px solid var(--line);
+    border-radius:9px;padding:8px 32px 8px 13px;box-shadow:var(--shadow);cursor:pointer;-webkit-appearance:none;appearance:none;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23003087' stroke-width='3'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;background-position:right 11px center;}
+  .lang-select:hover{border-color:#c3d4ee}
+  .filters .cnt{font-size:11px;font-weight:700;opacity:.6;margin-left:3px}
+  .searchbar{position:relative;margin:0 0 14px}
+  .searchbar .si{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--muted);pointer-events:none}
+  .searchbar input{width:100%;box-sizing:border-box;font:inherit;font-size:14px;padding:11px 14px 11px 36px;border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:var(--shadow);color:var(--ink)}
+  .searchbar input:focus{outline:none;border-color:#9db8e6;box-shadow:0 0 0 3px rgba(0,48,135,.08)}
+  .viewtabs{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:10px;padding:3px;box-shadow:var(--shadow);margin:0 0 14px}
+  .viewtabs button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13.5px;font-weight:600;padding:7px 16px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:7px}
+  .viewtabs button[aria-pressed="true"]{background:var(--wmo);color:#fff}
+  .mapwrap{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:16px}
+  .mapwrap svg{width:100%;height:auto;display:block;background:#f7fafe;border-radius:10px}
+  .mapzoom{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:5px;z-index:5}
+  .mapzoom button{width:30px;height:30px;border:1px solid var(--line);background:#fff;border-radius:7px;box-shadow:var(--shadow);cursor:pointer;font-size:16px;font-weight:700;color:var(--wmo);line-height:1;display:flex;align-items:center;justify-content:center}
+  .mapzoom button:hover{background:#f2f6fc}
+  #mapSvg{cursor:grab;touch-action:none}
+  .country{stroke:#fff;stroke-width:.4;transition:fill .25s}
+  .country.hostable{cursor:pointer}
+  .country.hostable:hover{stroke:#0066cc;stroke-width:1}
+  .maplegend{display:flex;align-items:center;gap:10px;margin-top:14px;font-size:12.5px;color:var(--muted);flex-wrap:wrap}
+  .legbar{height:12px;width:170px;border-radius:6px;background:linear-gradient(90deg,#cfe0ff,#003087)}
+  .mapstatus{padding:34px 20px;text-align:center;color:var(--muted);font-size:14px;line-height:1.6}
+  .maptip{position:fixed;pointer-events:none;background:#0b1b3a;color:#fff;font-size:12.5px;padding:6px 9px;border-radius:7px;box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:0;transition:opacity .12s;z-index:50;white-space:nowrap}
+  .mapdetail{margin-top:16px}
+  .mapdetail-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+  .mapdetail-head h3{margin:0;font-size:15px;color:var(--wmo)}
+  .mapdetail-head .clear{font-size:12.5px;color:var(--accent);cursor:pointer;background:none;border:0;font-weight:600}
+  .mapdetail-list{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .mapdetail-hint{font-size:12.5px;color:var(--muted)}
+  .country.haslist{cursor:pointer}
+  .country.sel{stroke:#00205e;stroke-width:1.4}
+  .maplegend{gap:12px}
+  .maplegend .lg{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin-right:5px}
+  .mapdetail-filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+  .minitabs{display:inline-flex;background:#eef3fb;border:1px solid #dce6f4;border-radius:9px;padding:2px}
+  .minitabs button{border:0;background:transparent;color:#33507a;font:inherit;font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer}
+  .minitabs button[aria-pressed="true"]{background:#003087;color:#fff}
+  .mapmodes{display:inline-flex;background:#eef3fb;border:1px solid #dce6f4;border-radius:10px;padding:3px;margin:0 0 14px}
+  .mapmodes button{border:0;background:transparent;color:#33507a;font:inherit;font-size:13px;font-weight:600;padding:6px 15px;border-radius:8px;cursor:pointer}
+  .mapmodes button[aria-pressed="true"]{background:#003087;color:#fff}
+  .demo-badge{display:inline-block;background:#fff3d6;border:1px solid #f0dca0;border-radius:6px;padding:2px 8px;color:#7a5b12;font-weight:700;font-size:11px;letter-spacing:.5px;margin-right:6px}
+  .mapyears{display:flex;flex-wrap:nowrap;gap:6px;align-items:center;margin:0 0 14px;overflow-x:auto;padding-bottom:4px}
+  .mapyears .myl{flex:0 0 auto;font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-right:4px}
+  .mapyears button{flex:0 0 auto;border:1px solid var(--line);background:#fff;color:#33507a;font:inherit;font-size:12px;font-weight:600;padding:4px 10px;border-radius:7px;cursor:pointer;box-shadow:var(--shadow)}
+  .mapyears button[aria-pressed="true"]{background:var(--wmo);color:#fff;border-color:var(--wmo)}
+  #mapCoverage strong{color:var(--ink)}
+  .rightctl{display:flex;gap:10px;align-items:center}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--wmo);font:inherit;font-weight:600;font-size:13.5px;
+    padding:8px 14px;border-radius:9px;cursor:pointer;box-shadow:var(--shadow);display:inline-flex;gap:7px;align-items:center}
+  .btn:hover{border-color:#c3d4ee}
+  .btn.primary{background:var(--wmo);color:#fff;border-color:var(--wmo)}
+
+  /* Month nav */
+  .monthbar{display:flex;align-items:center;justify-content:center;gap:16px;margin:6px 0 14px}
+  .monthbar .mtitle{font-size:18px;font-weight:700;color:var(--wmo);min-width:210px;text-align:center}
+  .nav{width:38px;height:38px;border-radius:10px;border:1px solid var(--line);background:#fff;color:var(--wmo);
+    font-size:18px;cursor:pointer;box-shadow:var(--shadow)}
+  .nav:hover{border-color:#c3d4ee}
+
+  .grid2{display:grid;grid-template-columns:1.15fr .85fr;gap:20px;align-items:start}
+  @media(max-width:820px){.grid2{grid-template-columns:1fr}}
+
+  /* Calendar */
+  .cal{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:var(--shadow)}
+  .dow{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-bottom:6px}
+  .dow span{text-align:center;font-size:11px;font-weight:700;letter-spacing:.5px;color:var(--muted);text-transform:uppercase}
+  .days{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+  .day{aspect-ratio:1/1;border:1px solid transparent;border-radius:10px;padding:6px 6px 4px;cursor:default;
+    background:#fafcff;display:flex;flex-direction:column;gap:3px;min-height:52px;position:relative}
+  .day.out{background:transparent;color:#c2ccdb}
+  .day .num{font-size:13px;font-weight:600;color:var(--ink)}
+  .day.out .num{color:#c8d2e0;font-weight:500}
+  .day.has{cursor:pointer;border-color:#dde7f5;background:#fff}
+  .day.has:hover{border-color:var(--accent);box-shadow:0 0 0 2px rgba(0,102,204,.12)}
+  .day.sel{border-color:var(--wmo);box-shadow:0 0 0 2px rgba(0,48,135,.18);background:#fff}
+  .day.today .num{background:var(--today);color:#fff;border-radius:6px;padding:0 5px;line-height:19px}
+  .dots{display:flex;flex-wrap:wrap;gap:3px;margin-top:auto}
+  .d{width:6px;height:6px;border-radius:50%}
+  .d.on{background:var(--online)} .d.site{background:var(--onsite)}
+  .daycount{position:absolute;top:5px;right:6px;font-size:10px;font-weight:700;color:var(--muted)}
+
+  .legend{display:flex;gap:16px;margin:12px 4px 0;font-size:12px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+
+  /* List */
+  .listwrap{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+  .listhead{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .listhead h2{margin:0;font-size:15px;color:var(--wmo)}
+  .listhead .clear{font-size:12.5px;color:var(--accent);cursor:pointer;background:none;border:0;font-weight:600}
+  .list{max-height:560px;overflow:auto}
+  .ev{padding:14px 16px;border-bottom:1px solid var(--line);display:block;text-decoration:none;color:inherit}
+  .ev:last-child{border-bottom:0}
+  .ev:hover{background:#f7faff}
+  .ev .top{display:flex;gap:9px;align-items:center;margin-bottom:5px;flex-wrap:wrap}
+  .badge{font-size:10.5px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;padding:3px 8px;border-radius:999px}
+  .badge.on{background:var(--online-bg);color:var(--online)}
+  .badge.site{background:var(--onsite-bg);color:var(--onsite)}
+  .ev .when{font-size:12.5px;color:var(--muted);font-weight:600}
+  .ev h3{margin:2px 0 4px;font-size:15px;line-height:1.35;color:var(--ink)}
+  .ev .sub{font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 12px}
+  .ev .sub b{color:#3d4a63;font-weight:600}
+  .ev .go{font-size:12px;color:var(--accent);font-weight:700;margin-top:6px;display:inline-block;text-decoration:none}
+  .ev .go:hover{text-decoration:underline}
+  .ev h3 a{color:var(--ink);text-decoration:none}
+  .ev h3 a:hover{text-decoration:underline}
+  .evdet{margin-top:7px}
+  .evdet summary{cursor:pointer;font-size:12px;font-weight:700;color:var(--accent);list-style:none;display:inline-flex;align-items:center;gap:5px;user-select:none}
+  .evdet summary::-webkit-details-marker{display:none}
+  .evdet summary::before{content:"\25B8";font-size:9px;transition:transform .15s ease}
+  .evdet[open] summary::before{transform:rotate(90deg)}
+  .evdet summary:hover{text-decoration:underline}
+  .evdesc{margin-top:6px;font-size:12.5px;line-height:1.5;color:#48566b;white-space:pre-wrap;max-height:220px;overflow:auto;padding:9px 11px;background:#f7faff;border:1px solid var(--line);border-radius:8px}
+  .empty{padding:34px 18px;text-align:center;color:var(--muted);font-size:14px}
+  .empty svg{opacity:.4;margin-bottom:8px}
+
+  .note{margin:16px 2px 0;font-size:12px;color:var(--muted);text-align:center}
+  .note a{color:var(--accent)}
+  .banner{background:#fff7e6;border:1px solid #f5d98b;color:#7a5b12;border-radius:11px;padding:11px 14px;
+    font-size:13px;margin:0 2px 14px;display:none;align-items:flex-start;gap:9px}
+  .banner.show{display:flex}
+  .banner b{color:#6a4e0c}
+  .skeleton{color:var(--muted);padding:30px;text-align:center;font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <svg class="deco" viewBox="0 0 280 210" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <circle cx="188" cy="105" r="70" stroke="#bcd6ff" stroke-opacity=".55" stroke-width="1.2"/>
+      <ellipse cx="188" cy="105" rx="30" ry="70" stroke="#bcd6ff" stroke-opacity=".32" stroke-width="1"/>
+      <ellipse cx="188" cy="105" rx="55" ry="70" stroke="#bcd6ff" stroke-opacity=".22" stroke-width="1"/>
+      <line x1="118" y1="105" x2="258" y2="105" stroke="#bcd6ff" stroke-opacity=".3" stroke-width="1"/>
+      <path d="M126 78h124M133 132h110" stroke="#bcd6ff" stroke-opacity=".22" stroke-width="1"/>
+      <ellipse cx="188" cy="105" rx="96" ry="46" transform="rotate(-25 188 105)" stroke="#79abff" stroke-opacity=".6" stroke-width="1.3"/>
+      <g transform="rotate(-25 188 105)"><g transform="translate(92 105)">
+        <rect x="-5" y="-4" width="10" height="8" rx="1.5" fill="#e3edff"/>
+        <rect x="-15" y="-2.5" width="8" height="5" rx="1" fill="#9cc0ff"/>
+        <rect x="7" y="-2.5" width="8" height="5" rx="1" fill="#9cc0ff"/>
+      </g></g>
+    </svg>
+    <span class="eyebrow">WMO&ndash;CGMS Virtual Laboratory</span>
+    <h1>VLab Training Calendar</h1>
+    <p>Upcoming satellite-meteorology training across the WMO&ndash;CGMS Virtual Laboratory network.</p>
+    <div class="meta">
+      <span class="chip"><span class="dot-live"></span><span id="status">Loading events&hellip;</span></span>
+      <span class="chip" id="count"></span>
+      <span class="chip">EUMETSAT public training feed</span>
+    </div>
+  </header>
+
+  <div id="banner" class="banner">
+    <span>&#9888;</span>
+    <div id="bannerText"></div>
+  </div>
+
+  <div class="controls">
+    <div class="filtersets">
+      <div class="filterrow">
+        <span class="flabel">Format</span>
+        <div class="filters" role="group" aria-label="Filter by format">
+          <button data-mod="ALL"    aria-pressed="true">All <span class="cnt"></span></button>
+          <button data-mod="ONLINE" aria-pressed="false"><span class="swatch" style="background:var(--online)"></span>Online <span class="cnt"></span></button>
+          <button data-mod="ONSITE" aria-pressed="false"><span class="swatch" style="background:var(--onsite)"></span>In&#8209;person <span class="cnt"></span></button>
+        </div>
+      </div>
+      <div class="filterrow">
+        <span class="flabel">Source</span>
+        <div class="filters" role="group" aria-label="Filter by source">
+          <button data-src="ALL"      aria-pressed="true">All <span class="cnt"></span></button>
+          <button data-src="MEMBER"   aria-pressed="false"><span class="swatch" style="background:#003087"></span>VLab Members <span class="cnt"></span></button>
+          <button data-src="PARTNERS" aria-pressed="false"><span class="swatch" style="background:#8595ad"></span>Partners <span class="cnt"></span></button>
+        </div>
+      </div>
+      <div class="filterrow">
+        <span class="flabel">Language</span>
+        <select id="langSel" class="lang-select" aria-label="Filter by language">
+          <option value="ALL">All languages</option>
+          <option value="Arabic">Arabic</option>
+          <option value="Chinese">Chinese</option>
+          <option value="English">English</option>
+          <option value="French">French</option>
+          <option value="Russian">Russian</option>
+          <option value="Spanish">Spanish</option>
+          <option value="Portuguese">Portuguese</option>
+        </select>
+      </div>
+    </div>
+    <div class="rightctl">
+      <button class="btn" id="todayBtn">Today</button>
+      <button class="btn primary" id="icsBtn">&#8681; Export .ics</button>
+    </div>
+  </div>
+
+  <div class="searchbar">
+    <svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input type="search" id="searchBox" placeholder="Type a keyword to find training events&hellip;" aria-label="Search training events">
+  </div>
+
+  <div class="viewtabs" role="group" aria-label="View">
+    <button data-view="calendar" aria-pressed="true">&#128197; Calendar</button>
+    <button data-view="map" aria-pressed="false">&#128506; Map</button>
+  </div>
+
+  <div id="calview">
+  <div class="monthbar">
+    <button class="nav" id="prev" aria-label="Previous month">&#8249;</button>
+    <div class="mtitle" id="mtitle">&nbsp;</div>
+    <button class="nav" id="next" aria-label="Next month">&#8250;</button>
+  </div>
+
+  <div class="grid2">
+    <section class="cal" aria-label="Month calendar">
+      <div class="dow"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+      <div class="days" id="days"></div>
+      <div class="legend">
+        <span><span class="d on"></span> Online</span>
+        <span><span class="d site"></span> In&#8209;person</span>
+        <span><span class="num" style="font-weight:600">n</span> events on a day</span>
+      </div>
+    </section>
+
+    <aside class="listwrap" aria-label="Event list">
+      <div class="listhead">
+        <h2 id="listTitle">Upcoming this month</h2>
+        <button class="clear" id="clearSel" style="display:none">Show whole month</button>
+      </div>
+      <div class="list" id="list"><div class="skeleton">Loading&hellip;</div></div>
+    </aside>
+  </div>
+  </div><!-- /calview -->
+
+  <section id="mapview" class="mapwrap" style="display:none" aria-label="Training host map">
+    <div id="mapModes" class="mapmodes" role="group" aria-label="Map type" style="display:none">
+      <button data-mapmode="host" aria-pressed="true">Host locations</button>
+      <button data-mapmode="participants" aria-pressed="false">Participant locations</button>
+    </div>
+    <div id="mapYears" class="mapyears" role="group" aria-label="Filter map by year" style="display:none"></div>
+    <div id="mapStatus" class="mapstatus">Loading world map&hellip;</div>
+    <div id="mapCanvas" style="position:relative">
+      <svg id="mapSvg" viewBox="0 0 1000 500" preserveAspectRatio="xMidYMid meet" style="display:none" role="img" aria-label="World map"></svg>
+      <div class="mapzoom" id="mapZoom" style="display:none">
+        <button id="zoomIn" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zoomOut" type="button" title="Zoom out" aria-label="Zoom out">&minus;</button>
+        <button id="zoomReset" type="button" title="Reset view" aria-label="Reset view">&#10227;</button>
+      </div>
+    </div>
+    <div class="maplegend" id="mapLegend" style="display:none">
+      <span id="mapLegendLabel">Training hosted:</span>
+      <span>fewer</span><span class="legbar"></span><span>more</span>
+      <span><i class="lg" style="background:#e9eef5;border:1px solid #d7dfea"></i>none</span>
+    </div>
+    <div id="mapPeriod" style="margin-top:10px;font-size:12.5px;color:var(--muted)"></div>
+    <div id="mapCoverage" style="margin-top:6px;font-size:12.5px;color:var(--muted)"></div>
+    <div id="mapNote" style="margin-top:6px;font-size:12.5px;color:var(--muted)">Online events are placed by their host organisation&rsquo;s country.</div>
+    <div id="mapDetail" class="mapdetail"><div class="mapdetail-hint">Tip: click a highlighted country to list the training hosted there.</div></div>
+  </section>
+  <div class="maptip" id="mapTip"></div>
+
+  <p class="note">
+    Times shown in UTC. Calendar data &copy; EUMETSAT, served through the public training feed.
+    Reference implementation adapted from the Brazil CoE (INPE).
+  </p>
+</div>
+
+<script>
+/* ========================================================================
+   CONFIG
+   ======================================================================== */
+const CONFIG = {
+  // Public EUMETSAT / VLab training events feed (XML).
+  FEED_URL: "https://trainingevents.eumetsat.int/trapi/resources/public/events",
+  // Same-origin proxy for production (recommended). See vlab-eumetsat-proxy.php.
+  // Example when deployed on the VLab site: "/vlab/vlab-eumetsat-proxy.php"
+  PROXY_URL: "events.xml",
+  // Auto-refresh interval (ms). 0 disables.
+  REFRESH_MS: 60000,
+};
+
+/* ========================================================================
+   FETCH + NORMALIZE  (mirrors the Brazil CoE pipeline, client-side)
+   ======================================================================== */
+const FIELD = {
+  title:      ["title","name","eventTitle"],
+  startDate:  ["startDate","start","startdate","dateStart","from","beginDate"],
+  endDate:    ["endDate","end","enddate","dateEnd","to","finishDate"],
+  format:     ["format","attendance","attendanceType","mode","deliveryMode"],
+  eventType:  ["eventType","type","category","kind"],
+  status:     ["status","state"],
+  city:       ["city","location","venue","place"],
+  host:       ["host","organiser","organizer","provider","organisation"],
+  contactUrl: ["contactUrl","contact","url","link","website"],
+  registration:["registrationHowto","registration","howToRegister","registrationInfo","registrationUrl"],
+  description:["description","summary","abstract","details"],
+  languages:  ["languages","language","lang"],
+  country:    ["country","countryName","nation","hostCountry"],
+};
+
+/* Source classification: VLab CoE / VLab SatOps / Partners.
+   Heuristic on host + title + type. Refine the keyword lists to taste — CoE is
+   checked first, then satellite operators, everything else is a Partner. */
+const SOURCE = {
+  COE: [/centre of excellence/i,/center of excellence/i,/\bcoe\b/i,/\brtc\b/i,
+        /\binpe\b/i,/\bcira\b/i,/\bcimh\b/i,/\bsmn\b/i,/\bsaws\b/i,/\brshu\b/i,
+        /casablanca/i,/muscat/i,/niamey/i,/nanjing/i,/barbados/i,/vlab russia/i,
+        /bureau of meteorology/i,/\bbom\b/i,/\bbmtc\b/i,
+        /\bcaa\b/i,/\bdgm\b/i,/eamac/i,/south african weather service/i,/roshydromet/i,/\bcptec\b/i,
+        /\buba\b/i,/universidad de buenos aires/i,/\bnms\b.{0,12}argentin/i,/national meteorological service of argentina/i,
+        /russian federal service for hydrometeorolog/i,/src planeta/i,/advanced training institute/i,/meteovlab/i,/\basmet\b/i,
+        /general directorate of meteorology/i,/direction g[\u00e9e]n[\u00e9e]rale de la m[\u00e9e]t[\u00e9e]orologie/i,/\bdmn\b/i,
+        /\bimtr\b/i,/institute for meteorological training and research/i,/\bkmd\b/i,/kenya meteorological department/i,/regional training cent(re|er)/i,
+        /african[\w\s&]{0,20}weather briefing/i,
+        /weather briefing[\w\s&]{0,25}middle east|middle east[\w\s&]{0,25}weather briefing/i,
+        /regional focus group/i,/\brfg\b/i],
+  SATOPS: [/eumetsat/i,/nesdis/i,/\bnoaa\b/i,/\bcma\b/i,/\bjma\b/i,/\bkma\b/i,/\bimd\b/i,
+        /roshydromet/i,/roscosmos/i,/\bisro\b/i,/\bcnes\b/i,/\bnsmc\b/i,
+        /satellite operator/i,/\bsatops\b/i],
+};
+/* European organisations: when EUMETSAT co-hosts with one of these (a European
+   activity, not an African VLab CoE), the event is a Partner, not a Member. */
+const EURO_ORG = [
+  /\bdwd\b/i,/deutscher wetterdienst/i,/m[\u00e9e]t[\u00e9e]o.?france/i,/\bknmi\b/i,/ecmwf/i,/\bdmi\b/i,/\bfmi\b/i,/\bsmhi\b/i,
+  /meteoswiss/i,/\bzamg\b/i,/geosphere/i,/\baemet\b/i,/\bipma\b/i,/met office/i,/\bukmo\b/i,/met norway/i,/\bimgw\b/i,
+  /\bshmu\b/i,/\barso\b/i,/\bomsz\b/i,/\bdhmz\b/i,/\brhmz\b/i,/\bzhms\b/i,/\bhnms\b/i,/\blegmc\b/i,/\blhmt\b/i,/\bimwm\b/i,
+  /\bismar\b/i,/aeronautica militare/i,/italian air force/i,/royal meteorological society/i,/\brmets\b/i,
+  /estonian environment/i,/lithuanian hydrometeorolog/i,/latvian environment/i,
+  /\bessl\b/i,/european severe storms/i,/\bcnes\b/i,
+  /tu darmstadt/i,/technische universit[\u00e4a]t darmstadt/i,/\bioc\b/i,/\biode\b/i,/intergovernmental oceanographic/i,
+  /ecowas/i,/\bmesa\b/i
+];
+const PARTNER_ORG = [
+  /sociedade brasileira de meteorologia/i,/\bsbmet\b/i,
+  /tu darmstadt/i,/technische universit[\u00e4a]t darmstadt/i,/\bioc\b/i,/\biode\b/i,/intergovernmental oceanographic/i
+];
+/* WMO RA I (Africa) reference -> VLab regional training. Last-resort signal only:
+   it sits after every other rule, so it applies only when nothing else identifies the event. */
+function isRegional(text){
+  return /\b(ra|region|regional association)[\s-]*(i|1)\b/i.test(text||"");
+}
+/* Manual per-event overrides (exact title match) — individual events only, NOT a general rule. */
+function normTitle(t){ return (t||"").toLowerCase().replace(/[\u2010-\u2015]/g,"-").replace(/\s+/g," ").trim(); }
+const SOURCE_OVERRIDE = {
+  "workshop on the use of gridded satellite data for climate services - online phase":"MEMBER"
+};
+function classifySource(ev){
+  const _ov=SOURCE_OVERRIDE[normTitle(ev.title)]; if(_ov) return _ov;   // this specific event only
+  const host = ev.host||"";
+  const titleHost = (ev.title||"") + " " + host;
+  const core = titleHost + " " + (ev.eventType||"") + " " + (ev.city||"");   // host / title / type / venue
+  const hay = core + " " + (ev.url||"");                                      // + URL (for CoE acronyms in links)
+  // Explicit partner organisation as host (e.g. a national society) -> Partner,
+  // even if the course sits on a member's platform, unless a member co-hosts.
+  if(PARTNER_ORG.some(r=>r.test(host)) && !SOURCE.COE.some(r=>r.test(host)) && !SOURCE.SATOPS.some(r=>r.test(host))) return "PARTNERS";
+  if(/\bvlab\b|virtual lab/i.test(titleHost)) return "MEMBER";                    // "VLab" in the title/host
+  if(SOURCE.COE.some(r=>r.test(hay))) return "MEMBER";                            // VLab Centre of Excellence (incl. URL signals)
+  if(/eumetsat/i.test(hay) && EURO_ORG.some(r=>r.test(hay))) return "PARTNERS";   // EUMETSAT + European/partner co-host
+  if(SOURCE.SATOPS.some(r=>r.test(core))) return "MEMBER";                        // satellite operators from host/title/venue (not the URL domain)
+  if(isRegional(titleHost)) return "MEMBER";                                  // WMO Regional Association training (RA I-VI)
+  return "PARTNERS";
+}
+const SRC_LABEL = {MEMBER:"VLab Member", PARTNERS:"Partner"};
+const SRC_CLASS = {MEMBER:"coe", PARTNERS:"par"};
+
+/* Language filter — UN official languages + Portuguese. Feed values are
+   canonicalized (handles codes/variants like en, fr, español, français…). */
+const LANG_PATTERNS = [
+  ["Arabic",     /arab|(^|[^a-z])ar([^a-z]|$)|\u0627\u0644\u0639\u0631\u0628/i],
+  ["Chinese",    /chin|mandarin|(^|[^a-z])zh([^a-z]|$)|\u4e2d\u6587|\u4e2d\u56fd/i],
+  ["English",    /engl|(^|[^a-z])en(g)?([^a-z]|$)/i],
+  ["French",     /fren|fran[c\u00e7]ais|(^|[^a-z])fr([^a-z]|$)/i],
+  ["Russian",    /russ|(^|[^a-z])ru([^a-z]|$)|\u0440\u0443\u0441\u0441/i],
+  ["Spanish",    /span|espa[n\u00f1]ol|(^|[^a-z])es([^a-z]|$)/i],
+  ["Portuguese", /portu|portugu[e\u00ea]s|(^|[^a-z])pt([^a-z]|$)/i],
+];
+function canonLang(tok){
+  const s=(tok||"").trim();
+  for(const [name,rx] of LANG_PATTERNS){ if(rx.test(s)) return name; }
+  return null;
+}
+function normLangs(arr){
+  const out=[]; for(const tk of (arr||[])){ const c=canonLang(tk); if(c && !out.includes(c)) out.push(c); }
+  return out;
+}
+
+/* Host-country derivation for the map: explicit country > city "City, Country"
+   > host organisation. Names map to ISO-3166 numeric codes used by the map. */
+const ISO = {
+  /* Americas */
+  "Argentina":32,"Barbados":52,"Belize":84,"Bolivia":68,"Brazil":76,"Canada":124,"Chile":152,
+  "Colombia":170,"Costa Rica":188,"Cuba":192,"Dominican Republic":214,"Ecuador":218,"El Salvador":222,
+  "Guatemala":320,"Guyana":328,"Haiti":332,"Honduras":340,"Jamaica":388,"Mexico":484,"Nicaragua":558,
+  "Panama":591,"Paraguay":600,"Peru":604,"Suriname":740,"Trinidad and Tobago":780,"United States":840,
+  "Uruguay":858,"Venezuela":862,
+  /* Africa */
+  "Algeria":12,"Angola":24,"Benin":204,"Botswana":72,"Burkina Faso":854,"Burundi":108,"Cameroon":120,
+  "Cape Verde":132,"Central African Republic":140,"Chad":148,"Comoros":174,"Congo":178,
+  "Democratic Republic of the Congo":180,"Côte d'Ivoire":384,"Djibouti":262,"Egypt":818,
+  "Equatorial Guinea":226,"Eritrea":232,"Eswatini":748,"Ethiopia":231,"Gabon":266,"Gambia":270,"Ghana":288,
+  "Guinea":324,"Guinea-Bissau":624,"Kenya":404,"Lesotho":426,"Liberia":430,"Libya":434,"Madagascar":450,
+  "Malawi":454,"Mali":466,"Mauritania":478,"Mauritius":480,"Morocco":504,"Mozambique":508,"Namibia":516,
+  "Niger":562,"Nigeria":566,"Rwanda":646,"Senegal":686,"Sierra Leone":694,"Somalia":706,"South Africa":710,
+  "South Sudan":728,"Sudan":729,"Tanzania":834,"Togo":768,"Tunisia":788,"Uganda":800,"Zambia":894,"Zimbabwe":716,
+  /* Asia & Middle East */
+  "Afghanistan":4,"Armenia":51,"Azerbaijan":31,"Bahrain":48,"Bangladesh":50,"Bhutan":64,"Cambodia":116,
+  "China":156,"Georgia":268,"India":356,"Indonesia":360,"Iran":364,"Iraq":368,"Israel":376,"Japan":392,
+  "Jordan":400,"Kazakhstan":398,"Kuwait":414,"Kyrgyzstan":417,"Laos":418,"Lebanon":422,"Malaysia":458,
+  "Maldives":462,"Mongolia":496,"Myanmar":104,"Nepal":524,"North Korea":408,"Oman":512,"Pakistan":586,
+  "Philippines":608,"Qatar":634,"Saudi Arabia":682,"Singapore":702,"South Korea":410,"Sri Lanka":144,
+  "Syria":760,"Tajikistan":762,"Thailand":764,"Turkey":792,"Turkmenistan":795,"United Arab Emirates":784,
+  "Uzbekistan":860,"Vietnam":704,"Yemen":887,
+  /* Europe */
+  "Albania":8,"Austria":40,"Belarus":112,"Belgium":56,"Bosnia and Herzegovina":70,"Bulgaria":100,
+  "Croatia":191,"Cyprus":196,"Czechia":203,"Denmark":208,"Estonia":233,"Finland":246,"France":250,
+  "Germany":276,"Greece":300,"Hungary":348,"Iceland":352,"Ireland":372,"Italy":380,"Latvia":428,
+  "Lithuania":440,"Luxembourg":442,"Malta":470,"Moldova":498,"Montenegro":499,"Netherlands":528,
+  "North Macedonia":807,"Norway":578,"Poland":616,"Portugal":620,"Romania":642,"Russia":643,"Serbia":688,
+  "Slovakia":703,"Slovenia":705,"Spain":724,"Sweden":752,"Switzerland":756,"Ukraine":804,"United Kingdom":826,
+  /* Oceania */
+  "Australia":36,"Fiji":242,"New Zealand":554,"Papua New Guinea":598
+};
+const COUNTRY_ALIAS = [
+  [/^(usa|u\.s\.a?\.?|united states.*|america)$/i,"United States"],
+  [/^(uk|united kingdom|england|britain|great britain)$/i,"United Kingdom"],
+  [/^(korea|south korea|republic of korea)$/i,"South Korea"],
+  [/^(russia|russian federation)$/i,"Russia"],
+  [/^(uae|united arab emirates)$/i,"United Arab Emirates"],
+  [/^brasil$/i,"Brazil"],[/^maroc$/i,"Morocco"],
+];
+const HOST_COUNTRY = [
+  [/inpe|inmet|cptec|infraero|bras[il]|s[\u00e3a]o jos[\u00e9e]|macei[\u00f3o]/i,"Brazil"],
+  [/cimh|barbados|bridgetown/i,"Barbados"],
+  [/\bsmn\b|argentin|buenos aires/i,"Argentina"],
+  [/saws|south africa|pretoria|african[\w\s&]{0,20}weather briefing/i,"South Africa"],
+  [/rshu|roshydromet|roscosmos|russia|moscow|\brus\b/i,"Russia"],
+  [/cira|noaa|nesdis|\bnasa\b|\barset\b|\bgsfc\b|\bjpl\b|\busgs\b|\bucar\b|\bcomet\b|\bmeted\b|national weather service|\bnws\b|kansas city|\bnssc\b|united states|\busa\b/i,"United States"],
+  [/casablanca|\bdgm\b|\bdmn\b|general directorate of meteorology|morocc|maroc/i,"Morocco"],
+  [/muscat|\bcaa\b|\bpaca\b|public authority for civil aviation|\boman\b/i,"Oman"],
+  [/niamey|eamac|\bniger\b/i,"Niger"],
+  [/nanjing|beijing|cmatc|\bcma\b|china/i,"China"],
+  [/eumetsat|eumetrain|eumetcal|darmstadt|\bdwd\b|deutscher wetterdienst|german weather service|offenbach/i,"Germany"],
+  [/\bjma\b|japan|tokyo/i,"Japan"],
+  [/\bkma\b|korea|seoul/i,"South Korea"],
+  [/\bimd\b|isro|\bindia\b|new delhi|\bpune\b/i,"India"],
+  [/australia|bureau of meteorology|\bbom\b|\bbmtc\b|melbourne/i,"Australia"],
+  [/nairobi|\bimtr\b|\bkmd\b|kenya|institute for meteorological training and research|training (&|and) research/i,"Kenya"],
+  [/tanzania|zanzibar|dar es salaam/i,"Tanzania"],
+  [/nimet|nigeria|lagos|abuja/i,"Nigeria"],
+  [/cairo|egypt/i,"Egypt"],
+  [/jakarta|\bbmkg\b|indonesia/i,"Indonesia"],
+  [/manila|pagasa|philippines/i,"Philippines"],
+  [/costa rica|\bimn\b/i,"Costa Rica"],
+  [/algiers|algeria/i,"Algeria"],
+  [/dhaka|bangladesh/i,"Bangladesh"],
+  [/chile/i,"Chile"],
+  [/\biran\b|irimo/i,"Iran"],
+  [/canada|\buqam\b|qu[\u00e9e]bec|montr[\u00e9e]al|\beccc\b/i,"Canada"],
+  [/malaysia|\bukm\b|kebangsaan|kuala lumpur/i,"Malaysia"],
+  [/uzbekistan|tashkent/i,"Uzbekistan"],
+  [/kazakhstan|astana|almaty|nur.?sultan/i,"Kazakhstan"],
+  /* Europe: national meteorological / environment services (country clear from the name) */
+  [/m[\u00e9e]t[\u00e9e]o.?france|toulouse/i,"France"],
+  [/\bukmo\b|uk met office|united kingdom|ecmwf|royal meteorological society|\brmets\b/i,"United Kingdom"],
+  [/\bitaly\b|italian air force|aeronautica militare|\bismar\b|istituto delle scienze marine/i,"Italy"],
+  [/\bspain\b|\baemet\b|imedea|socib/i,"Spain"],
+  [/portugal|\bipma\b/i,"Portugal"],
+  [/netherlands|\bknmi\b/i,"Netherlands"],
+  [/belgium|belgian|li[\u00e8e]ge/i,"Belgium"],
+  [/austria|\bzamg\b|geosphere austria/i,"Austria"],
+  [/switzerland|meteoswiss|world meteorological organi[sz]ation|\bgeneva\b/i,"Switzerland"],
+  [/sweden|\bsmhi\b/i,"Sweden"],
+  [/norway|norwegian|met norway/i,"Norway"],
+  [/denmark|danish|\bdmi\b/i,"Denmark"],
+  [/finland|finnish|\bfmi\b/i,"Finland"],
+  [/iceland/i,"Iceland"],
+  [/ireland|[\u00e9e]ireann/i,"Ireland"],
+  [/estonia/i,"Estonia"],
+  [/latvia|\blegmc\b/i,"Latvia"],
+  [/lithuania|\blhmt\b/i,"Lithuania"],
+  [/poland|\bimgw\b|\bimwm\b/i,"Poland"],
+  [/czech/i,"Czechia"],
+  [/slovakia|\bshmu\b/i,"Slovakia"],
+  [/slovenia|\barso\b/i,"Slovenia"],
+  [/hungar|\bomsz\b/i,"Hungary"],
+  [/romania/i,"Romania"],
+  [/bulgaria/i,"Bulgaria"],
+  [/croatia|\bdhmz\b/i,"Croatia"],
+  [/serbia|\brhmz\b/i,"Serbia"],
+  [/montenegro|\bzhms\b/i,"Montenegro"],
+  [/north macedonia|macedonia/i,"North Macedonia"],
+  [/bosnia/i,"Bosnia and Herzegovina"],
+  [/albania/i,"Albania"],
+  [/greece|greek|\bhnms\b/i,"Greece"],
+  [/cyprus/i,"Cyprus"],
+  [/\bmalta\b/i,"Malta"],
+  [/luxembourg/i,"Luxembourg"],
+  [/ukraine|ukrainian/i,"Ukraine"],
+  [/belarus/i,"Belarus"],
+  [/moldova/i,"Moldova"],
+  [/t[\u00fcu]rkiye|turkey|\bmgm\b/i,"Turkey"],
+  /* Regional fallback (lowest priority): unattributed Middle East forums -> Oman */
+  [/middle east/i,"Oman"],
+];
+function canonCountry(name){
+  const s=(name||"").trim(); if(!s) return null;
+  for(const [rx,c] of COUNTRY_ALIAS){ if(rx.test(s)) return c; }
+  for(const k in ISO){ if(k.toLowerCase()===s.toLowerCase()) return k; }
+  return null;
+}
+function hostCountryOrdered(text){
+  let euGermany=false, best=null, bestPos=Infinity;
+  for(const [rx,cc] of HOST_COUNTRY){
+    const m=text.match(rx); if(!m) continue;
+    if(cc==="Germany" && /\beumetsat\b|eumetrain|eumetcal/i.test(m[0])){ euGermany=true; continue; }  // EUMETSAT is lowest priority: a CoE co-host wins
+    if(m.index<bestPos){ bestPos=m.index; best=cc; }
+  }
+  return best || (euGermany ? "Germany" : null);
+}
+function deriveCountry(ev){
+  let c = canonCountry(ev.country);
+  if(c) return c;
+  if(ev.city){
+    const parts=ev.city.split(",");
+    c=canonCountry(parts[parts.length-1]); if(c) return c;          // "City, Country"
+    c=canonCountry(ev.city.trim());        if(c) return c;          // whole field is a country
+    c=cityToCountry(ev.city);              if(c) return c;          // known venue city -> country
+    for(const [rx,cc] of HOST_COUNTRY){ if(rx.test(ev.city)) return cc; }
+  }
+  c = hostCountryOrdered((ev.host||"")+" "+(ev.title||""));            if(c) return c;   // FIRST-listed host wins (e.g. IMTR-EUMETSAT -> Kenya)
+  c = hostCountryOrdered((ev.description||"")+" "+(ev.eventType||"")); if(c) return c;   // description last resort
+  return null;
+}
+/* Free-text search index: title, host, description, type, venue, country,
+   languages, member/partner label + WMO region synonyms (RA II = Region 2). */
+function searchText(e){
+  let s=[e.title,e.host,e.description,e.eventType,e.city,e.hostCountry,(e.languages||[]).join(" "),(SRC_LABEL[e.source]||"")].join(" ").toLowerCase();
+  const R=[["i","1"],["ii","2"],["iii","3"],["iv","4"],["v","5"],["vi","6"]];
+  for(const [rom,ar] of R){
+    if(new RegExp("\\b(ra|region|regional association)[\\s-]*"+rom+"\\b").test(s) || new RegExp("\\b(ra|region)[\\s-]*"+ar+"\\b").test(s))
+      s+=" ra "+rom+" region "+rom+" region "+ar+" ";
+  }
+  return s;
+}
+/* Venue city -> country. Keys are lower-case, accent-free (accents are stripped
+   before lookup, so "València" matches "valencia"). */
+function stripAccents(s){ return (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
+const CITY_COUNTRY = {
+  "valencia":"Spain","madrid":"Spain","barcelona":"Spain","palma":"Spain","mallorca":"Spain","sevilla":"Spain","seville":"Spain","zaragoza":"Spain","malaga":"Spain","bilbao":"Spain","tenerife":"Spain","las palmas":"Spain",
+  "darmstadt":"Germany","bonn":"Germany","berlin":"Germany","munich":"Germany","muenchen":"Germany","offenbach":"Germany","hamburg":"Germany","frankfurt":"Germany","cologne":"Germany",
+  "toulouse":"France","paris":"France","lannion":"France","lille":"France","lyon":"France","marseille":"France","brest":"France",
+  "reading":"United Kingdom","exeter":"United Kingdom","london":"United Kingdom","edinburgh":"United Kingdom","oxford":"United Kingdom","cambridge":"United Kingdom","dublin":"Ireland",
+  "rome":"Italy","roma":"Italy","bologna":"Italy","milan":"Italy","milano":"Italy","venice":"Italy","venezia":"Italy","trieste":"Italy","turin":"Italy","naples":"Italy",
+  "amsterdam":"Netherlands","de bilt":"Netherlands","utrecht":"Netherlands","the hague":"Netherlands","rotterdam":"Netherlands","brussels":"Belgium","bruxelles":"Belgium","liege":"Belgium","luxembourg":"Luxembourg",
+  "helsinki":"Finland","stockholm":"Sweden","norrkoping":"Sweden","oslo":"Norway","bergen":"Norway","copenhagen":"Denmark","reykjavik":"Iceland",
+  "vienna":"Austria","wien":"Austria","zurich":"Switzerland","geneva":"Switzerland","bern":"Switzerland","warsaw":"Poland","krakow":"Poland","prague":"Czechia","brno":"Czechia","bratislava":"Slovakia","budapest":"Hungary","ljubljana":"Slovenia","zagreb":"Croatia","belgrade":"Serbia","sarajevo":"Bosnia and Herzegovina","podgorica":"Montenegro","skopje":"North Macedonia","tirana":"Albania","sofia":"Bulgaria","bucharest":"Romania","chisinau":"Moldova","kyiv":"Ukraine","kiev":"Ukraine","minsk":"Belarus","tallinn":"Estonia","riga":"Latvia","vilnius":"Lithuania",
+  "lisbon":"Portugal","lisboa":"Portugal","porto":"Portugal","athens":"Greece","thessaloniki":"Greece","nicosia":"Cyprus","valletta":"Malta","istanbul":"Turkey","ankara":"Turkey","izmir":"Turkey",
+  "muscat":"Oman","doha":"Qatar","dubai":"United Arab Emirates","abu dhabi":"United Arab Emirates","riyadh":"Saudi Arabia","jeddah":"Saudi Arabia","kuwait city":"Kuwait","manama":"Bahrain","amman":"Jordan","beirut":"Lebanon","tehran":"Iran","baghdad":"Iraq",
+  "casablanca":"Morocco","rabat":"Morocco","algiers":"Algeria","tunis":"Tunisia","cairo":"Egypt","nairobi":"Kenya","dar es salaam":"Tanzania","zanzibar":"Tanzania","addis ababa":"Ethiopia","lagos":"Nigeria","abuja":"Nigeria","accra":"Ghana","dakar":"Senegal","niamey":"Niger","pretoria":"South Africa","johannesburg":"South Africa","cape town":"South Africa","kampala":"Uganda","kigali":"Rwanda","harare":"Zimbabwe","lusaka":"Zambia","maputo":"Mozambique","windhoek":"Namibia","gaborone":"Botswana",
+  "beijing":"China","shanghai":"China","nanjing":"China","tokyo":"Japan","seoul":"South Korea","new delhi":"India","delhi":"India","pune":"India","mumbai":"India","dhaka":"Bangladesh","islamabad":"Pakistan","karachi":"Pakistan","colombo":"Sri Lanka","kathmandu":"Nepal","bangkok":"Thailand","hanoi":"Vietnam","jakarta":"Indonesia","kuala lumpur":"Malaysia","singapore":"Singapore","manila":"Philippines","tashkent":"Uzbekistan","almaty":"Kazakhstan","astana":"Kazakhstan","melbourne":"Australia","sydney":"Australia","canberra":"Australia","wellington":"New Zealand","auckland":"New Zealand",
+  "buenos aires":"Argentina","brasilia":"Brazil","sao paulo":"Brazil","rio de janeiro":"Brazil","sao jose dos campos":"Brazil","santiago":"Chile","lima":"Peru","bogota":"Colombia","quito":"Ecuador","montevideo":"Uruguay","asuncion":"Paraguay","la paz":"Bolivia","caracas":"Venezuela","mexico city":"Mexico","san jose":"Costa Rica","panama city":"Panama","havana":"Cuba","kingston":"Jamaica","bridgetown":"Barbados","washington":"United States","new york":"United States","boulder":"United States","fort collins":"United States","miami":"United States","ottawa":"Canada","toronto":"Canada","montreal":"Canada"
+};
+function cityToCountry(cityStr){
+  const raw=stripAccents((cityStr||"").toLowerCase());
+  const tokens=[raw.trim(), ...raw.split(/[,(){}\/;|]/).map(x=>x.trim())].filter(Boolean);
+  for(const t of tokens){ if(CITY_COUNTRY[t]) return CITY_COUNTRY[t]; }
+  return null;
+}
+
+/* ILLUSTRATIVE participant reach (country -> participants). The training feed
+   carries no attendee origins, so these are DEMO numbers only, shown to
+   demonstrate how a participant-reach map would look. Replace with real data. */
+const PARTICIPANTS = {
+  "Brazil":210,"Argentina":95,"United States":90,"Barbados":40,
+  "Peru":70,"Chile":65,"Colombia":85,"Ecuador":55,"Bolivia":45,"Paraguay":40,"Uruguay":35,"Venezuela":50,
+  "Mexico":75,"Costa Rica":40,"Panama":25,"Guatemala":30,"Dominican Republic":35,"Cuba":30,"Jamaica":25,"Trinidad and Tobago":25,
+  "Nigeria":140,"Kenya":120,"South Africa":160,"Ghana":75,"Niger":80,"Senegal":50,"Tanzania":60,
+  "Morocco":110,"Algeria":65,"Egypt":90,"Ethiopia":70,"Uganda":55,
+  "Oman":85,"Saudi Arabia":70,"United Arab Emirates":60,"Qatar":45,"Kuwait":25,
+  "India":130,"China":150,"Indonesia":115,"Japan":40,"South Korea":35,"Pakistan":60,"Bangladesh":55,"Philippines":70,"Vietnam":50,
+  "Russia":100,"Kazakhstan":55,"Belarus":30,
+  "Germany":50,"France":45,"Spain":40,"Portugal":30,"United Kingdom":35,"Italy":25,"Turkey":30,"Australia":20
+};
+function participantYearMatrix(){
+  // Deterministic per-year split of each country's demo total across the feed's years,
+  // so the year filter visibly changes the (illustrative) participant map.
+  const years=[...new Set(state.all.filter(e=>e.startDate).map(e=>new Date(toUTC(e.startDate)).getUTCFullYear()))].sort((a,b)=>a-b);
+  const key=years.join(",");
+  if(participantYearMatrix._k===key) return participantYearMatrix._m;
+  const m={};
+  for(const name in PARTICIPANTS){
+    const base=PARTICIPANTS[name];
+    let seed=0; for(let i=0;i<name.length;i++) seed=(seed*33+name.charCodeAt(i))>>>0;
+    const w=years.map((y,i)=>0.4 + (((seed>>(i%20))&15)/15) + i*0.05);
+    const sum=w.reduce((a,b)=>a+b,0)||1, per={};
+    years.forEach((y,i)=>{ per[y]=Math.max(1,Math.round(base*w[i]/sum)); });
+    m[name]=per;
+  }
+  participantYearMatrix._k=key; participantYearMatrix._m=m; participantYearMatrix._years=years;
+  return m;
+}
+function participantCounts(){
+  const m=participantYearMatrix(), years=participantYearMatrix._years;
+  const sel=(state.mapYears&&state.mapYears.length)?state.mapYears:years;
+  const counts={};
+  for(const name in PARTICIPANTS){ const num=ISO[name]; if(!num) continue;
+    let s=0; for(const y of sel){ s+=(m[name][y]||0); }
+    if(s) counts[num]=(counts[num]||0)+s;
+  }
+  return counts;
+}
+
+function childText(el, names){
+  if(!el) return "";
+  for(const n of names){
+    // case-insensitive local name match on direct children
+    for(const c of el.children){
+      if(c.localName && c.localName.toLowerCase() === n.toLowerCase()){
+        const t = (c.textContent||"").trim();
+        if(t) return t;
+      }
+    }
+  }
+  return "";
+}
+/* Some feed fields nest an id/code with the name, e.g.
+   <type><id>104</id><name>Discussion</name></type>  -> textContent "104Discussion"
+   <language><id>3</id><code>en</code><name>English</name></language> -> "3enEnglish".
+   These helpers pull the human-readable name instead of the concatenation. */
+function leafName(el){
+  const kids = el.children ? Array.from(el.children) : [];
+  if(!kids.length) return (el.textContent||"").trim();
+  const prefer=["name","label","title","displayname","text","value"];
+  for(const p of prefer){ const g=kids.find(k=>k.localName&&k.localName.toLowerCase()===p); if(g){ const t=(g.textContent||"").trim(); if(t) return t; } }
+  return (kids[kids.length-1].textContent||"").trim();   // name usually comes last (after id/code)
+}
+function childValue(el, names){
+  if(!el) return "";
+  for(const n of names){
+    for(const c of el.children){
+      if(c.localName && c.localName.toLowerCase() === n.toLowerCase()){
+        const kids = c.children ? Array.from(c.children) : [];
+        let t;
+        if(!kids.length) t=(c.textContent||"").trim();
+        else if(kids.length>1 && kids.every(k=>k.localName&&k.localName.toLowerCase()===kids[0].localName.toLowerCase()))
+          t=kids.map(leafName).filter(Boolean).join(", ");   // repeated items (e.g. many <language>)
+        else t=leafName(c);                                   // wrapped {id, code, name}
+        if(t) return t;
+      }
+    }
+  }
+  return "";
+}
+/* Fallback for flat concatenations like "104Discussion" or "3enEnglish". */
+function unwrapLabel(s){
+  s=(s||"").trim();
+  let m=s.replace(/^\d+(?=[A-Za-z])/,"");     // leading numeric id, only when a letter follows
+  m=m.replace(/^[a-z]{2,3}(?=[A-Z])/,"");     // leading 2-3 letter code before a capitalised name
+  m=m.trim();
+  return m||s;
+}
+function firstUrl(s){ const m=(s||"").match(/https?:\/\/[^\s"'<>)]+/i); return m?m[0]:""; }
+function normFormat(raw, city, extra){
+  const ONL=/online|virtual|remote|webinar|distance|e-?learning|zoom|ms teams|microsoft teams|webex|skype|gotomeeting|adobe connect/;
+  const r=(raw||"").toLowerCase(), c=(city||"").toLowerCase(), x=(extra||"").toLowerCase();
+  if(ONL.test(r)) return "ONLINE";
+  if(/on-?site|in-?person|face|classroom|physical/.test(r)) return "ONSITE";
+  if(ONL.test(c)) return "ONLINE";                                            // "Where: Online" / a platform name -> online
+  if(/on-?site|in-?person|face|classroom/.test(c)) return "ONSITE";
+  const cc=c.trim();
+  if(cc && !/^(online|virtual|remote|tbd|tba|n\/?a|-|none)$/.test(cc)) return "ONSITE";   // a real venue -> in-person
+  // venue empty/placeholder: consult the title + description before defaulting
+  if(ONL.test(x)) return "ONLINE";
+  if(/\bin-?person\b|\bon-?site\b|face-?to-?face|(?:take place|be held|hosted) (?:at|in)\b|venue[:\s]|\bpremises\b|\bcampus\b/.test(x)) return "ONSITE";
+  return "ONLINE";                                                            // no venue and no other cue -> online
+}
+/* Corrections layered on top of the raw feed format.
+   Australian Regional Focus Groups are online meetings, not in-person. */
+function refineFormat(ev, fmt){
+  const hay=(ev.host||"")+" "+(ev.title||"")+" "+(ev.description||"");
+  if(/regional focus group|\brfg\b/i.test(hay) && /australia/i.test(hay)) return "ONLINE";
+  return fmt;
+}
+function slug(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,60); }
+/* Strip leading icon-font glyphs, emoji, control/format chars and stray symbols
+   that some feed fields carry before the real value (e.g. "\uE001 English"). */
+function cleanText(s){ return (s||"").replace(/[\p{Cc}\p{Cf}\p{Co}]/gu,"").replace(/^[^\p{L}\p{N}]+/u,"").trim(); }
+
+function parseFeed(xmlText){
+  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+  if(doc.querySelector("parsererror")) throw new Error("XML parse error");
+  // Accept <event>, <Event> or Atom-ish <entry>
+  let nodes = [...doc.getElementsByTagName("event")];
+  if(!nodes.length) nodes = [...doc.getElementsByTagName("Event")];
+  if(!nodes.length) nodes = [...doc.getElementsByTagName("entry")];
+  const seen = new Set();
+  const out = [];
+  for(const el of nodes){
+    const title = childText(el, FIELD.title);
+    const startDate = childText(el, FIELD.startDate);
+    const endDate = childText(el, FIELD.endDate) || startDate;
+    if(!title || !startDate) continue;                 // reject incomplete records
+    const key = title + "|" + startDate;
+    if(seen.has(key)) continue;                        // dedup by title+start
+    seen.add(key);
+    const city = childText(el, FIELD.city);
+    const reg  = childText(el, FIELD.registration);
+    const contact = childText(el, FIELD.contactUrl);
+    const langsRaw = childValue(el, FIELD.languages);
+    const desc = childText(el, FIELD.description);
+    const obj = {
+      id: slug(title)+"_"+startDate,
+      title,
+      startDate, endDate,
+      format: normFormat(childText(el, FIELD.format), city, (title||"")+" "+(desc||"")),
+      eventType: cleanText(unwrapLabel(childValue(el, FIELD.eventType))),
+      status: childText(el, FIELD.status) || null,
+      city: city || null,
+      host: cleanText(unwrapLabel(childValue(el, FIELD.host))) || null,
+      url: firstUrl(reg) || firstUrl(contact) || (contact.startsWith("http")?contact:"") || null,
+      description: desc || null,
+      languages: langsRaw ? langsRaw.split(/[,;/]| and /i).map(x=>cleanText(unwrapLabel(x))).filter(Boolean) : [],
+      country: childText(el, FIELD.country) || null,
+      sourceName: "EUMETSAT",
+    };
+    obj.format = refineFormat(obj, obj.format);
+    obj.source = classifySource(obj);
+    obj.langs = normLangs(obj.languages);
+    obj.hostCountry = deriveCountry(obj);
+    obj.isoNum = obj.hostCountry ? ISO[obj.hostCountry] : null;
+    obj._search = searchText(obj);
+    out.push(obj);
+  }
+  return out;
+}
+
+async function loadEvents(){
+  const url = CONFIG.PROXY_URL || CONFIG.FEED_URL;
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), 20000);
+  try{
+    const res = await fetch(url, {headers:{Accept:"application/xml,text/xml;q=0.9,*/*;q=0.8"},
+                                   cache:"no-store", signal:ctrl.signal});
+    clearTimeout(t);
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    const text = await res.text();
+    const events = parseFeed(text);
+    if(!events.length) throw new Error("no events parsed");
+    return {events, live:true};
+  }catch(err){
+    clearTimeout(t);
+    return {events: SAMPLE_EVENTS.slice(), live:false, error:String(err.message||err)};
+  }
+}
+
+/* ========================================================================
+   UTC-safe date helpers  (calendar must not shift by viewer timezone)
+   ======================================================================== */
+function ymd(d){return d.slice(0,10);}
+function toUTC(dstr){const [y,m,dd]=ymd(dstr).split("-").map(Number);return Date.UTC(y,m-1,dd);}
+function dayKey(ms){const d=new Date(ms);return d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0")+"-"+String(d.getUTCDate()).padStart(2,"0");}
+function monthKey(ms){const d=new Date(ms);return d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0");}
+function eventCoversDay(ev, dayMs){const s=toUTC(ev.startDate), e=toUTC(ev.endDate); return dayMs>=s && dayMs<=e;}
+function fmtRange(ev){
+  const opt={day:"numeric",month:"short",timeZone:"UTC"}, optY={day:"numeric",month:"short",year:"numeric",timeZone:"UTC"};
+  const s=new Date(toUTC(ev.startDate)), e=new Date(toUTC(ev.endDate));
+  if(ymd(ev.startDate)===ymd(ev.endDate)) return e.toLocaleDateString("en-GB",optY);
+  return s.toLocaleDateString("en-GB",opt)+" – "+e.toLocaleDateString("en-GB",optY);
+}
+
+/* ========================================================================
+   STATE + RENDER
+   ======================================================================== */
+const state = { all:[], filter:"ALL", source:"ALL", lang:"ALL", search:"", view:"calendar", mapMode:"host", mapSel:null, mapYears:[], detailYear:"ALL", detailMode:"ALL", viewMonth:null, selectedDay:null, live:false };
+const els = {
+  days:document.getElementById("days"), list:document.getElementById("list"),
+  mtitle:document.getElementById("mtitle"), status:document.getElementById("status"),
+  count:document.getElementById("count"), listTitle:document.getElementById("listTitle"),
+  clearSel:document.getElementById("clearSel"), banner:document.getElementById("banner"),
+  bannerText:document.getElementById("bannerText"),
+};
+
+function filtered(){
+  const terms=(state.search||"").toLowerCase().split(/\s+/).filter(Boolean);
+  return state.all.filter(e =>
+    (state.filter==="ALL" || e.format===state.filter) &&
+    (state.source==="ALL" || e.source===state.source) &&
+    (state.lang==="ALL"   || (e.langs||[]).includes(state.lang)) &&
+    (terms.length===0 || terms.every(t=>(e._search||"").includes(t))));
+}
+
+/* Faceted counts: each facet counts events that pass the OTHER two filters,
+   so the numbers reflect what selecting that option would actually show. */
+function facetCounts(){
+  const mMatch = e => state.filter==="ALL" || e.format===state.filter;
+  const sMatch = e => state.source==="ALL" || e.source===state.source;
+  const lMatch = e => state.lang==="ALL"   || (e.langs||[]).includes(state.lang);
+  const qTerms = (state.search||"").toLowerCase().split(/\s+/).filter(Boolean);
+  const qMatch = e => qTerms.length===0 || qTerms.every(t=>(e._search||"").includes(t));
+  const fmt ={ALL:0,ONLINE:0,ONSITE:0};
+  const src ={ALL:0,MEMBER:0,PARTNERS:0};
+  const lang={ALL:0,Arabic:0,Chinese:0,English:0,French:0,Russian:0,Spanish:0,Portuguese:0};
+  for(const e of state.all){
+    if(sMatch(e)&&lMatch(e)&&qMatch(e)){ fmt.ALL++; e.format==="ONLINE"?fmt.ONLINE++:fmt.ONSITE++; }
+    if(mMatch(e)&&lMatch(e)&&qMatch(e)){ src.ALL++; e.source==="MEMBER"?src.MEMBER++:src.PARTNERS++; }
+    if(mMatch(e)&&sMatch(e)&&qMatch(e)){ lang.ALL++; for(const L of (e.langs||[])) if(L in lang) lang[L]++; }
+  }
+  return {fmt,src,lang};
+}
+function setCnt(el,n){ const c=el.querySelector(".cnt"); if(c) c.textContent = n!=null ? "("+n+")" : ""; }
+function updateCounts(){
+  const fc=facetCounts();
+  document.querySelectorAll("[data-mod]").forEach(b=>setCnt(b, fc.fmt[b.dataset.mod]));
+  document.querySelectorAll("[data-src]").forEach(b=>setCnt(b, fc.src[b.dataset.src]));
+  const sel=document.getElementById("langSel");
+  [...sel.options].forEach(o=>{ if(o.dataset.base==null) o.dataset.base=o.textContent;
+    const c=fc.lang[o.value]; o.textContent = o.dataset.base + (c!=null ? " ("+c+")" : ""); });
+}
+
+function renderCalendar(){
+  const evs = filtered();
+  // ----- month title
+  const first = new Date(state.viewMonth);
+  els.mtitle.textContent = first.toLocaleDateString("en-GB",{month:"long",year:"numeric",timeZone:"UTC"});
+
+  // ----- build 6x7 grid starting Monday
+  const y=first.getUTCFullYear(), m=first.getUTCMonth();
+  const firstMs=Date.UTC(y,m,1);
+  let lead=(new Date(firstMs).getUTCDay()+6)%7;            // Mon=0
+  const gridStart=firstMs - lead*86400000;
+  const todayKey=dayKey(Date.now());
+  // group events by day within grid range
+  const byDay=new Map();
+  for(const ev of evs){
+    let d=toUTC(ev.startDate); const end=toUTC(ev.endDate);
+    for(;d<=end;d+=86400000){ const k=dayKey(d); if(!byDay.has(k))byDay.set(k,[]); byDay.get(k).push(ev); }
+  }
+  els.days.innerHTML="";
+  for(let i=0;i<42;i++){
+    const ms=gridStart+i*86400000, k=dayKey(ms), inMonth=new Date(ms).getUTCMonth()===m;
+    const dayEvents=byDay.get(k)||[];
+    const cell=document.createElement("div");
+    cell.className="day"+(inMonth?"":" out")+(dayEvents.length?" has":"")+(k===todayKey?" today":"")+(k===state.selectedDay?" sel":"");
+    const uniq=[...new Set(dayEvents.map(e=>e.id))].length;
+    cell.innerHTML=`<span class="num">${new Date(ms).getUTCDate()}</span>`+
+      (uniq?`<span class="daycount">${uniq}</span>`:"")+
+      (dayEvents.length?`<span class="dots">${
+        [...new Map(dayEvents.map(e=>[e.id,e])).values()].slice(0,6)
+          .map(e=>`<span class="d ${e.format==="ONLINE"?"on":"site"}"></span>`).join("")
+      }</span>`:"");
+    if(dayEvents.length){ cell.onclick=()=>{ state.selectedDay=(state.selectedDay===k?null:k); render(); }; }
+    els.days.appendChild(cell);
+  }
+
+  // ----- list (selected day, else whole visible month, sorted by start)
+  let listEvents;
+  if(state.selectedDay){
+    const dms=toUTC(state.selectedDay);
+    listEvents=evs.filter(e=>eventCoversDay(e,dms));
+    els.listTitle.textContent="Events on "+new Date(dms).toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric",timeZone:"UTC"});
+    els.clearSel.style.display="";
+  }else{
+    const mk=monthKey(state.viewMonth);
+    listEvents=evs.filter(e=>{ // any day of the event falls in the visible month
+      let d=toUTC(e.startDate); const end=toUTC(e.endDate);
+      for(;d<=end;d+=86400000){ if(monthKey(d)===mk) return true; } return false;
+    });
+    els.listTitle.textContent="Training this month";
+    els.clearSel.style.display="none";
+  }
+  listEvents.sort((a,b)=>toUTC(a.startDate)-toUTC(b.startDate));
+  els.list.innerHTML = listEvents.length ? listEvents.map(cardHTML).join("") :
+    `<div class="empty">
+       <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>
+       <div>No ${state.filter==="ALL"?"":state.filter==="ONLINE"?"online ":"in-person "}training in this ${state.selectedDay?"day":"month"}.</div>
+     </div>`;
+}
+
+function cardHTML(ev){
+  const badge = ev.format==="ONLINE"
+    ? '<span class="badge on">Online</span>' : '<span class="badge site">In-person</span>';
+  const sbadge = `<span class="badge src ${SRC_CLASS[ev.source]||"par"}">${SRC_LABEL[ev.source]||"Partner"}</span>`;
+  const sub=[];
+  if(ev.host) sub.push(`<span><b>Host:</b> ${esc(ev.host)}</span>`);
+  if(ev.city && ev.format==="ONSITE") sub.push(`<span><b>Where:</b> ${esc(ev.city)}</span>`);
+  if(ev.eventType) sub.push(`<span><b>Type:</b> ${esc(ev.eventType)}</span>`);
+  if(ev.languages && ev.languages.length) sub.push(`<span><b>Language:</b> ${esc(ev.languages.join(", "))}</span>`);
+  const titleHtml = ev.url
+    ? `<a href="${esc(ev.url)}" target="_blank" rel="noopener">${esc(ev.title)}</a>`
+    : esc(ev.title);
+  const details = ev.description
+    ? `<details class="evdet"><summary>Details</summary><div class="evdesc">${esc(ev.description)}</div></details>`
+    : "";
+  const go = ev.url ? `<a class="go" href="${esc(ev.url)}" target="_blank" rel="noopener">Register / details &rarr;</a>` : "";
+  return `<div class="ev">
+    <div class="top">${badge}${sbadge}<span class="when">${fmtRange(ev)}</span></div>
+    <h3>${titleHtml}</h3>
+    ${sub.length?`<div class="sub">${sub.join("")}</div>`:""}
+    ${details}
+    ${go}
+  </div>`;
+}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+/* ------- .ics export of the current filtered + visible-month slice ------- */
+function icsDate(dstr,plus){let ms=toUTC(dstr); if(plus)ms+=86400000; const d=new Date(ms);
+  return d.getUTCFullYear()+String(d.getUTCMonth()+1).padStart(2,"0")+String(d.getUTCDate()).padStart(2,"0");}
+function icsEsc(s){return String(s||"").replace(/[\\,;]/g,m=>"\\"+m).replace(/\r?\n/g," ");}
+function exportICS(){
+  const mk=monthKey(state.viewMonth);
+  const evs=filtered().filter(e=>{let d=toUTC(e.startDate);const end=toUTC(e.endDate);
+    for(;d<=end;d+=86400000){if(monthKey(d)===mk)return true;}return false;});
+  const stamp=new Date().toISOString().replace(/[-:]/g,"").split(".")[0]+"Z";
+  let ics=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//WMO VLab//Training Calendar//EN","CALSCALE:GREGORIAN","METHOD:PUBLISH"];
+  for(const e of evs){
+    ics.push("BEGIN:VEVENT",
+      "UID:"+e.id+"@vlab.wmo.int",
+      "DTSTAMP:"+stamp,
+      "DTSTART;VALUE=DATE:"+icsDate(e.startDate,false),
+      "DTEND;VALUE=DATE:"+icsDate(e.endDate,true),
+      "SUMMARY:"+icsEsc(e.title),
+      "CATEGORIES:"+(e.format==="ONLINE"?"Online":"In-person")+(e.eventType?","+icsEsc(e.eventType):""),
+      e.city?"LOCATION:"+icsEsc(e.city):"LOCATION:Online",
+      e.host?"ORGANIZER;CN="+icsEsc(e.host)+":mailto:noreply@vlab.wmo.int":"",
+      e.url?"URL:"+icsEsc(e.url):"",
+      e.description?"DESCRIPTION:"+icsEsc(e.description):"",
+      e.status?"STATUS:CONFIRMED":"",
+      "END:VEVENT");
+  }
+  ics.push("END:VCALENDAR");
+  const blob=new Blob([ics.filter(Boolean).join("\r\n")],{type:"text/calendar"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+  a.download="vlab-training-"+mk+".ics";a.click();URL.revokeObjectURL(a.href);
+}
+
+/* ========================================================================
+   MAP VIEW — choropleth of host countries (world map lazy-loaded from CDN)
+   ======================================================================== */
+const MAP = { ready:false, loading:false, paths:{}, name:{} };
+/* --- Map zoom & pan (viewBox based) --- */
+const MAPVIEW={x:0,y:0,w:1000,h:500};
+let panState={active:false,moved:false};
+function applyMapView(){ const s=document.getElementById("mapSvg"); if(s) s.setAttribute("viewBox",MAPVIEW.x.toFixed(1)+" "+MAPVIEW.y.toFixed(1)+" "+MAPVIEW.w.toFixed(1)+" "+MAPVIEW.h.toFixed(1)); }
+function clampMapView(){
+  MAPVIEW.w=Math.max(90,Math.min(1000,MAPVIEW.w)); MAPVIEW.h=MAPVIEW.w/2;
+  MAPVIEW.x=Math.max(0,Math.min(1000-MAPVIEW.w,MAPVIEW.x));
+  MAPVIEW.y=Math.max(0,Math.min(500-MAPVIEW.h,MAPVIEW.y));
+}
+function zoomMap(factor,cx,cy){
+  cx=(cx==null)?MAPVIEW.x+MAPVIEW.w/2:cx; cy=(cy==null)?MAPVIEW.y+MAPVIEW.h/2:cy;
+  const nw=Math.max(90,Math.min(1000,MAPVIEW.w*factor));
+  MAPVIEW.x=cx-(cx-MAPVIEW.x)*(nw/MAPVIEW.w);
+  MAPVIEW.y=cy-(cy-MAPVIEW.y)*(nw/MAPVIEW.w);
+  MAPVIEW.w=nw; MAPVIEW.h=nw/2; clampMapView(); applyMapView();
+}
+function resetMapView(){ MAPVIEW.x=0;MAPVIEW.y=0;MAPVIEW.w=1000;MAPVIEW.h=500; applyMapView(); }
+function svgPoint(e){ const s=document.getElementById("mapSvg"),r=s.getBoundingClientRect();
+  return { x: MAPVIEW.x+(e.clientX-r.left)/r.width*MAPVIEW.w, y: MAPVIEW.y+(e.clientY-r.top)/r.height*MAPVIEW.h }; }
+function initMapZoom(){
+  const svg=document.getElementById("mapSvg"); if(!svg||svg._zoomInit) return; svg._zoomInit=true;
+  svg.addEventListener("wheel",e=>{ e.preventDefault(); const p=svgPoint(e); zoomMap(e.deltaY>0?1.2:0.83, p.x, p.y); },{passive:false});
+  svg.addEventListener("pointerdown",e=>{ panState={active:true,moved:false,sx:e.clientX,sy:e.clientY,ox:MAPVIEW.x,oy:MAPVIEW.y}; svg.style.cursor="grabbing"; });
+  window.addEventListener("pointermove",e=>{ if(!panState.active)return; const r=svg.getBoundingClientRect(); const dx=e.clientX-panState.sx, dy=e.clientY-panState.sy; if(Math.abs(dx)+Math.abs(dy)>4)panState.moved=true; MAPVIEW.x=panState.ox-dx/r.width*MAPVIEW.w; MAPVIEW.y=panState.oy-dy/r.height*MAPVIEW.h; clampMapView(); applyMapView(); });
+  window.addEventListener("pointerup",()=>{ if(panState.active){ panState.active=false; svg.style.cursor="grab"; } });
+  const b=(id,fn)=>{ const el=document.getElementById(id); if(el) el.onclick=fn; };
+  b("zoomIn",()=>zoomMap(0.7)); b("zoomOut",()=>zoomMap(1.4)); b("zoomReset",resetMapView);
+}
+function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement("script"); s.src=src; s.async=true; s.onload=res; s.onerror=()=>rej(new Error("Could not load "+src)); document.head.appendChild(s); }); }
+function projRing(r){
+  const W=1000,H=500;
+  const px=lon=>((lon+180)/360*W).toFixed(1), py=lat=>((90-lat)/180*H).toFixed(1);
+  // Split the ring at antimeridian (±180) crossings, so a far-east part (e.g. Russia's
+  // Chukotka) doesn't smear across the map or leave a stray edge near Japan.
+  const arcs=[]; let cur=[r[0]];
+  for(let i=1;i<r.length;i++){
+    const a=r[i-1], b=r[i];
+    if(Math.abs(b[0]-a[0])>180){
+      const aE=a[0]>0?180:-180;
+      const bUn=b[0]+(a[0]>0?360:-360);          // unwrap b onto a's side
+      const t=(aE-a[0])/(bUn-a[0]);
+      const lat=a[1]+t*(b[1]-a[1]);              // latitude where it crosses ±180
+      cur.push([aE,lat]); arcs.push(cur);
+      cur=[[a[0]>0?-180:180, lat], b];
+    } else cur.push(b);
+  }
+  arcs.push(cur);
+  if(arcs.length>1){ arcs[0]=arcs.pop().concat(arcs[0]); }   // join the wrap-around piece (last+first)
+  let d="";
+  for(const arc of arcs){
+    d+="M"+px(arc[0][0])+","+py(arc[0][1]);
+    for(let i=1;i<arc.length;i++) d+="L"+px(arc[i][0])+","+py(arc[i][1]);
+    d+="Z";
+  }
+  return d;
+}
+function geoPath(g){ if(g.type==="Polygon") return g.coordinates.map(projRing).join(""); if(g.type==="MultiPolygon") return g.coordinates.flat().map(projRing).join(""); return ""; }
+function colorFor(c,max){ const t=Math.sqrt(c/max), a=[207,224,255], b=[0,48,135]; const m=a.map((x,i)=>Math.round(x+(b[i]-x)*t)); return "rgb("+m[0]+","+m[1]+","+m[2]+")"; }
+function ensureMap(){
+  if(MAP.ready || MAP.loading) return;
+  MAP.loading=true;
+  loadScript("https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js")
+    .then(()=>fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json",{cache:"force-cache"}))
+    .then(r=>{ if(!r.ok) throw new Error("world map HTTP "+r.status); return r.json(); })
+    .then(topo=>{ const feats=topojson.feature(topo,topo.objects.countries).features; buildMap(feats); MAP.ready=true; MAP.loading=false; paintMap(); })
+    .catch(err=>{ MAP.loading=false; const st=document.getElementById("mapStatus");
+      if(st){ st.style.display=""; st.textContent="The world map couldn\u2019t be loaded here (it needs a small map library from a CDN). The Calendar view works normally; on the live site the map appears whenever the page can reach the CDN."; }
+      console.warn(err); });
+}
+function buildMap(feats){
+  const NS="http://www.w3.org/2000/svg", svg=document.getElementById("mapSvg"), tip=document.getElementById("mapTip");
+  svg.innerHTML="";
+  for(const f of feats){
+    const num=+f.id, nm=(f.properties && f.properties.name) || null;
+    const p=document.createElementNS(NS,"path");
+    p.setAttribute("d",geoPath(f.geometry));
+    p.setAttribute("class","country");
+    p.setAttribute("fill","#e9eef5");
+    MAP.paths[num]=p; MAP.name[num]=nm; p._name=nm; p._info=null;
+    p.addEventListener("mousemove",ev=>{ if(!p._name || panState.active) return;
+      const c=p._info; let t=p._name;
+      if(state.mapMode==="participants"){ t+= c ? (" \u2014 "+c.participants+" participants (demo)") : " \u2014 no data"; }
+      else if(!c) t+=" \u2014 no training";
+      else { const n=c.events.length, parts=[]; if(c.inperson)parts.push(c.inperson+" in-person"); if(c.online)parts.push(c.online+" online"); t+=" \u2014 "+n+" event"+(n>1?"s":"")+" ("+parts.join(" \u00b7 ")+")"; }
+      tip.textContent=t; tip.style.left=(ev.clientX+12)+"px"; tip.style.top=(ev.clientY+12)+"px"; tip.style.opacity="1"; });
+    p.addEventListener("mouseleave",()=>{ tip.style.opacity="0"; });
+    p.addEventListener("click",()=>{ if(!panState.moved) selectCountry(num); });
+    svg.appendChild(p);
+  }
+  document.getElementById("mapStatus").style.display="none";
+  svg.style.display="";
+  document.getElementById("mapLegend").style.display="";
+  document.getElementById("mapModes").style.display="";
+  document.getElementById("mapZoom").style.display="";
+  initMapZoom();
+}
+function inMapYears(e){
+  if(!state.mapYears || !state.mapYears.length) return true;   // empty = all years
+  if(!e.startDate) return false;
+  return state.mapYears.includes(new Date(toUTC(e.startDate)).getUTCFullYear());
+}
+function renderYearChips(){
+  const box=document.getElementById("mapYears");
+  const years=[...new Set(state.all.filter(e=>e.startDate).map(e=>new Date(toUTC(e.startDate)).getUTCFullYear()))].sort((a,b)=>a-b);
+  if(!years.length){ box.style.display="none"; return; }
+  box.style.display="";
+  const sel=state.mapYears||[];
+  box.innerHTML='<span class="myl">Years:</span>'
+    +'<button data-year="ALL" aria-pressed="'+(sel.length===0?'true':'false')+'">All</button>'
+    +years.map(y=>'<button data-year="'+y+'" aria-pressed="'+(sel.includes(y)?'true':'false')+'">'+y+'</button>').join("");
+  box.querySelectorAll("button").forEach(b=>b.onclick=()=>{
+    const v=b.dataset.year;
+    if(v==="ALL"){ state.mapYears=[]; }
+    else { const y=+v, s=new Set(state.mapYears||[]); s.has(y)?s.delete(y):s.add(y); state.mapYears=[...s].sort((a,b)=>a-b); }
+    state.detailYear="ALL"; state.detailMode="ALL";
+    paintMap();
+  });
+}
+function mapCounts(){
+  const cat={};
+  for(const e of filtered()){
+    if(!e.isoNum || !inMapYears(e)) continue;
+    const c = cat[e.isoNum] || (cat[e.isoNum]={inperson:0, online:0, events:[]});
+    if(e.format==="ONLINE") c.online++; else c.inperson++;
+    c.events.push(e);
+  }
+  return cat;
+}
+function paintMap(){
+  if(!MAP.ready) return;
+  const mode = state.mapMode || "host";
+  renderYearChips();   // year filter applies to both maps
+  if(mode==="participants"){
+    const counts=participantCounts();
+    const max=Math.max(1,...Object.values(counts));
+    MAP.eventsByNum={};
+    for(const num in MAP.paths){ const p=MAP.paths[num], n=counts[num]||0; p._info=n?{participants:n}:null;
+      p.setAttribute("fill", n?colorFor(n,max):"#e9eef5");
+      p.setAttribute("class","country"+(p._name?" hostable":"")); }
+  } else {
+    const cat=mapCounts();
+    MAP.eventsByNum={}; for(const n in cat) MAP.eventsByNum[n]=cat[n].events;
+    const max=Math.max(1,...Object.keys(cat).map(n=>cat[n].events.length));
+    for(const num in MAP.paths){ const p=MAP.paths[num], c=cat[num]||null; p._info=c;
+      p.setAttribute("fill", c?colorFor(c.events.length,max):"#e9eef5");
+      p.setAttribute("class","country"+(p._name?" hostable":"")+(c?" haslist":"")+(+num===state.mapSel?" sel":"")); }
+  }
+  updateMapText(mode);
+  if(mode==="host" && state.mapSel!=null) showCountryDetail(state.mapSel); else clearDetail(mode);
+}
+function updateMapText(mode){
+  mode = mode || state.mapMode || "host";
+  const per=document.getElementById("mapPeriod"), cov=document.getElementById("mapCoverage"),
+        note=document.getElementById("mapNote"), label=document.getElementById("mapLegendLabel");
+  if(mode==="participants"){
+    label.textContent="Participants (illustrative):";
+    const counts=participantCounts();
+    const total=Object.values(counts).reduce((a,b)=>a+b,0), n=Object.keys(counts).length;
+    const yrs=(state.mapYears&&state.mapYears.length)? ("years "+state.mapYears.join(", ")) : "all years";
+    per.innerHTML='<span class="demo-badge">DEMO DATA</span> Sample participant numbers, shown only to demonstrate how a participant&#8209;reach map would look &mdash; replace with real figures.';
+    cov.textContent="Illustrative reach across "+n+" countries (\u2248"+total+" participants) for "+yrs+". Use the years above to change the period.";
+    note.textContent="";
+    return;
+  }
+  label.textContent="Training hosted:";
+  note.textContent="Online events are placed by their host organisation\u2019s country.";
+  const inview=filtered().filter(e=>e.startDate && inMapYears(e));
+  const placed=inview.filter(e=>e.isoNum), unplaced=inview.length-placed.length;
+  const fmt=ms=>new Date(ms).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric",timeZone:"UTC"});
+  if(placed.length){
+    const mn=Math.min(...placed.map(e=>toUTC(e.startDate))), mx=Math.max(...placed.map(e=>toUTC(e.endDate)));
+    per.textContent="Where training is hosted, "+fmt(mn)+" \u2013 "+fmt(mx)+".";
+  } else per.textContent="No located training for the current filters.";
+  cov.innerHTML = "<strong>"+placed.length+" of "+inview.length+"</strong> event"+(inview.length!==1?"s":"")+" in view shown on the map"
+    + (unplaced ? " \u00b7 "+unplaced+" not placed (host country not indicated)." : ".");
+}
+function clearDetail(mode){
+  mode = mode || state.mapMode || "host";
+  document.getElementById("mapDetail").innerHTML = (mode==="participants")
+    ? '<div class="mapdetail-hint">Illustrative demo map \u2014 hover a country to see its sample participant number. Real figures would replace these.</div>'
+    : '<div class="mapdetail-hint">Tip: click a highlighted country to list the training hosted there.</div>';
+}
+function selectCountry(num){
+  if((state.mapMode||"host")!=="host") return;
+  if(!(MAP.eventsByNum && MAP.eventsByNum[num] && MAP.eventsByNum[num].length)) return;
+  state.mapSel = num; state.detailYear="ALL"; state.detailMode="ALL";
+  paintMap();
+}
+function showCountryDetail(num){
+  const box=document.getElementById("mapDetail");
+  const name=MAP.name[num] || ("#"+num);
+  const all=((MAP.eventsByNum && MAP.eventsByNum[num]) || []);
+  if(!all.length){ box.innerHTML='<div class="mapdetail-hint">No training hosted in '+esc(name)+' in this range.</div>'; return; }
+  const years=[...new Set(all.map(e=>new Date(toUTC(e.startDate)).getUTCFullYear()))].sort((a,b)=>b-a);
+  const evs=all.filter(e=>{
+      const y=new Date(toUTC(e.startDate)).getUTCFullYear();
+      const modeOK=state.detailMode==="ALL" || e.format===state.detailMode;
+      const yearOK=state.detailYear==="ALL" || y===+state.detailYear;
+      return modeOK && yearOK;
+    }).sort((a,b)=>toUTC(b.startDate)-toUTC(a.startDate));   // newest first
+  const yearOpts='<option value="ALL">All years</option>'+years.map(y=>'<option value="'+y+'"'+(state.detailYear==String(y)?' selected':'')+'>'+y+'</option>').join("");
+  const modeBtn=(v,l)=>'<button data-dmode="'+v+'" aria-pressed="'+(state.detailMode===v?'true':'false')+'">'+l+'</button>';
+  box.innerHTML='<div class="mapdetail-head"><h3>Training hosted in '+esc(name)+' ('+all.length+')</h3>'
+    +'<button class="clear" id="mapClear">Clear selection</button></div>'
+    +'<div class="mapdetail-filters">'
+      +'<select id="mapDetailYear" class="lang-select">'+yearOpts+'</select>'
+      +'<div class="minitabs" id="mapDetailMode">'+modeBtn("ALL","All")+modeBtn("ONSITE","In-person")+modeBtn("ONLINE","Online")+'</div>'
+    +'</div>'
+    +'<div class="mapdetail-list">'+(evs.length
+        ? evs.map(cardHTML).join("")
+        : '<div class="mapdetail-hint" style="padding:14px 16px">No training matches these filters.</div>')+'</div>';
+  document.getElementById("mapClear").onclick=()=>{ state.mapSel=null; paintMap(); };
+  document.getElementById("mapDetailYear").onchange=(e)=>{ state.detailYear=e.target.value; showCountryDetail(num); };
+  document.querySelectorAll("#mapDetailMode button").forEach(b=>b.onclick=()=>{ state.detailMode=b.dataset.dmode; showCountryDetail(num); });
+}
+function renderMap(){ ensureMap(); if(MAP.ready) paintMap(); }
+
+/* Render dispatcher: counts always; then the active view. */
+function render(){
+  updateCounts();
+  const isMap = state.view==="map";
+  document.getElementById("calview").style.display = isMap ? "none" : "";
+  document.getElementById("mapview").style.display = isMap ? "" : "none";
+  if(isMap) renderMap(); else renderCalendar();
+}
+
+/* ========================================================================
+   BOOT + events
+   ======================================================================== */
+function setStatus(res){
+  state.live=res.live;
+  const updated=new Date().toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:"UTC"});
+  els.status.textContent = res.live ? "Live · updated "+updated+" UTC" : "Sample data (preview)";
+  els.count.textContent = state.all.length + " event"+(state.all.length!==1?"s":"")+" in feed";
+  if(!res.live){
+    els.banner.classList.add("show");
+    els.bannerText.innerHTML="<b>Showing sample data.</b> The live EUMETSAT feed couldn't be loaded directly in this preview "+
+      "(browsers block the cross-origin request). On the VLab site, serve it through the included "+
+      "<code>vlab-eumetsat-proxy.php</code> and set <code>CONFIG.PROXY_URL</code> — the calendar then shows live events."+
+      (res.error?" <span style='opacity:.7'>("+esc(res.error)+")</span>":"");
+  }else{
+    els.banner.classList.remove("show");
+  }
+}
+async function refresh(){
+  const res=await loadEvents();
+  state.all=res.events;
+  if(!state.viewMonth){
+    // open on the month of the next upcoming event, else current month
+    const now=Date.now();
+    const upcoming=res.events.map(e=>toUTC(e.endDate)).filter(ms=>ms>=now).sort((a,b)=>a-b)[0];
+    const base=upcoming?new Date(upcoming):new Date();
+    state.viewMonth=Date.UTC(base.getUTCFullYear(),base.getUTCMonth(),1);
+  }
+  setStatus(res); render();
+}
+function shiftMonth(n){const d=new Date(state.viewMonth);state.viewMonth=Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+n,1);state.selectedDay=null;render();}
+
+document.querySelectorAll(".filters button").forEach(b=>b.onclick=()=>{
+  if(b.dataset.mod)      state.filter = b.dataset.mod;
+  else if(b.dataset.src) state.source = b.dataset.src;
+  state.selectedDay=null;
+  b.parentElement.querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed", x===b?"true":"false"));
+  render();
+});
+document.getElementById("langSel").onchange=(ev)=>{ state.lang=ev.target.value; state.selectedDay=null; render(); };
+document.getElementById("searchBox").addEventListener("input",(ev)=>{ state.search=ev.target.value; state.selectedDay=null; state.mapSel=null; render(); });
+document.querySelectorAll(".mapmodes button").forEach(b=>b.onclick=()=>{
+  state.mapMode=b.dataset.mapmode; state.mapSel=null;
+  document.querySelectorAll(".mapmodes button").forEach(x=>x.setAttribute("aria-pressed", x===b?"true":"false"));
+  if(MAP.ready) paintMap();
+});
+document.querySelectorAll(".viewtabs button").forEach(b=>b.onclick=()=>{
+  state.view=b.dataset.view;
+  document.querySelectorAll(".viewtabs button").forEach(x=>x.setAttribute("aria-pressed", x===b?"true":"false"));
+  render();
+});
+document.getElementById("prev").onclick=()=>shiftMonth(-1);
+document.getElementById("next").onclick=()=>shiftMonth(1);
+document.getElementById("todayBtn").onclick=()=>{const d=new Date();state.viewMonth=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),1);state.selectedDay=dayKey(Date.now());render();};
+document.getElementById("clearSel").onclick=()=>{state.selectedDay=null;render();};
+document.getElementById("icsBtn").onclick=exportICS;
+
+/* ---- sample data (used only if the live feed can't be reached) ---------- */
+const SAMPLE_EVENTS = sampleEvents();
+function sampleEvents(){
+  // Realistic placeholders reflecting recent VLab-network activity, spread
+  // across the coming months so the interface is fully reviewable offline.
+  const Y=new Date().getUTCFullYear();
+  const d=(mm,dd)=>`${Y}-${String(mm).padStart(2,"0")}-${String(dd).padStart(2,"0")}`;
+  const mk=(o)=>{const e={id:slug(o.title)+"_"+o.startDate,status:"confirmed",description:null,sourceName:"EUMETSAT",languages:o.languages||["English"],...o};e.format=refineFormat(e,e.format);e.source=classifySource(e);e.langs=normLangs(e.languages);e.hostCountry=deriveCountry(e);e.isoNum=e.hostCountry?ISO[e.hostCountry]:null;e._search=searchText(e);return e;};
+  return [
+    mk({title:"MARINA – Marine Applications of Satellite Data (virtual journey)",startDate:d(7,22),endDate:d(7,24),format:"ONLINE",eventType:"Workshop",host:"CoE Muscat (CAA Oman)",city:null,description:"A three-day virtual journey through the marine applications of satellite data across the Middle East and Africa \u2014 covering sea-surface temperature, ocean colour, altimetry and scatterometer winds, with hands-on sessions and expert talks."}),
+    mk({title:"MTG Data Services & Products for Operational Meteorology",startDate:d(6,29),endDate:d(7,3),format:"ONSITE",eventType:"Course",host:"Casablanca VLab CoE / EUMETSAT",city:"Casablanca, Morocco",languages:["English","French"],description:"Hands-on training on MTG data services and products for operational meteorology: accessing MTG-I/MTG-S data, FCI imagery and RGB composites, the Lightning Imager, and integrating products into nowcasting and forecasting workflows."}),
+    mk({title:"Nowcasting Severe Convection with Satellite RGBs",startDate:d(7,15),endDate:d(7,15),format:"ONLINE",eventType:"Focus group",host:"RFG Americas & Caribbean",city:null,languages:["English","Spanish"]}),
+    mk({title:"Dust Monitoring with Satellite Data (Arabic)",startDate:d(8,5),endDate:d(8,6),format:"ONLINE",eventType:"Short course",host:"CoE Muscat (CAA Oman)",city:null,languages:["Arabic"]}),
+    mk({title:"Principles of Satellite Remote Sensing with Python",startDate:d(9,8),endDate:d(9,26),format:"ONLINE",eventType:"Course",host:"CoE SMN Argentina",city:null,languages:["Spanish"]}),
+    mk({title:"RA I Quarterly Weather Briefing",startDate:d(9,28),endDate:d(9,28),format:"ONLINE",eventType:"Briefing",host:"SAWS & EUMETSAT",city:null}),
+    mk({title:"BIP-M: Satellite Meteorology & AI-assisted Learning",startDate:d(9,1),endDate:d(9,30),format:"ONLINE",eventType:"Professional development",host:"RSHU / VLab Russia",city:null,languages:["English"]}),
+    mk({title:"Ocean Colour Applications for Coastal Services",startDate:d(10,13),endDate:d(10,16),format:"ONSITE",eventType:"Workshop",host:"EUMETSAT",city:"Lisbon, Portugal"}),
+    mk({title:"Introduction to MTG-I Lightning Imager Products",startDate:d(10,21),endDate:d(10,22),format:"ONLINE",eventType:"Webinar",host:"EUMETSAT",city:null}),
+    mk({title:"I South American Symposium on Severe Storms (I SSTS)",startDate:d(11,9),endDate:d(11,12),format:"ONSITE",eventType:"Symposium",host:"CoE Brazil (INPE)",city:"São José dos Campos, Brazil",languages:["English","Portuguese","Spanish"],description:"The first South American Symposium on Severe Storms brings together researchers and forecasters on nowcasting, AI applications, numerical modelling, case studies and climatology of severe storms. Oral and poster sessions, invited talks and round tables."}),
+  ];
+}
+
+/* go */
+refresh();
+if(CONFIG.REFRESH_MS>0){
+  setInterval(()=>{ if(document.visibilityState==="visible") refresh(); }, CONFIG.REFRESH_MS);
+  document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") refresh(); });
+}
+</script>
+</body>
+</html>
