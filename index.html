@@ -1113,7 +1113,7 @@ function inMapYears(e){
 }
 function renderYearChips(){
   const box=document.getElementById("mapYears");
-  const years=[...new Set(state.all.filter(e=>e.startDate).map(e=>new Date(toUTC(e.startDate)).getUTCFullYear()))].sort((a,b)=>a-b);
+  const years=[...new Set(state.all.filter(e=>e.startDate).map(e=>new Date(toUTC(e.startDate)).getUTCFullYear()))].sort((a,b)=>b-a);
   if(!years.length){ box.style.display="none"; return; }
   box.style.display="";
   const sel=state.mapYears||[];
