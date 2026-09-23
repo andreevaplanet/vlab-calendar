@@ -306,10 +306,7 @@
   </div><!-- /calview -->
 
   <section id="mapview" class="mapwrap" style="display:none" aria-label="Training host map">
-    <div id="mapModes" class="mapmodes" role="group" aria-label="Map type" style="display:none">
-      <button data-mapmode="host" aria-pressed="true">Host locations</button>
-      <button data-mapmode="participants" aria-pressed="false">Participant locations</button>
-    </div>
+    <div id="mapModes" class="mapmodes" role="group" aria-label="Map type" style="display:none"></div>
     <div id="mapYears" class="mapyears" role="group" aria-label="Filter map by year" style="display:none"></div>
     <div id="mapStatus" class="mapstatus">Loading world map&hellip;</div>
     <div id="mapCanvas" style="position:relative">
@@ -348,7 +345,7 @@ const CONFIG = {
   FEED_URL: "https://trainingevents.eumetsat.int/trapi/resources/public/events",
   // Same-origin proxy for production (recommended). See vlab-eumetsat-proxy.php.
   // Example when deployed on the VLab site: "/vlab/vlab-eumetsat-proxy.php"
-  PROXY_URL: "events.xml",
+  PROXY_URL: "",
   // Auto-refresh interval (ms). 0 disables.
   REFRESH_MS: 60000,
 };
@@ -1104,7 +1101,6 @@ function buildMap(feats){
   document.getElementById("mapStatus").style.display="none";
   svg.style.display="";
   document.getElementById("mapLegend").style.display="";
-  document.getElementById("mapModes").style.display="";
   document.getElementById("mapZoom").style.display="";
   initMapZoom();
 }
