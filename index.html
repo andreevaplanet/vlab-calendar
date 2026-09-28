@@ -1089,13 +1089,26 @@ function ensureMap(){
 function buildMap(feats){
   const NS="http://www.w3.org/2000/svg", svg=document.getElementById("mapSvg"), tip=document.getElementById("mapTip");
   svg.innerHTML="";
+  MAP.paths={}; MAP.name={}; MAP.neutral=[];
+  /* Several features in the embedded world geometry share one numeric id
+     (e.g. 156 = China, Taiwan and an unnamed Aksai Chin polygon; 724 = Spain +
+     Canary Islands; 356 = India + an unnamed polygon). Previously each feature
+     overwrote the previous one in MAP.paths, so only the LAST polygon of an id
+     was coloured/clickable (for China: the small unnamed Aksai Chin piece).
+     Now every id keeps ALL of its named polygons. */
+  const ID_FIX={"156|Taiwan":158};   // geometry quirk: Taiwan carries China's id; ISO 3166-1 numeric for Taiwan is 158
   for(const f of feats){
-    const num=+f.id, nm=(f.properties && f.properties.name) || null;
+    const nm=(f.properties && f.properties.name) || null;
+    const num=ID_FIX[(+f.id)+"|"+nm] || +f.id;
     const p=document.createElementNS(NS,"path");
     p.setAttribute("d",geoPath(f.geometry));
     p.setAttribute("class","country");
     p.setAttribute("fill","#e9eef5");
-    MAP.paths[num]=p; MAP.name[num]=nm; p._name=nm; p._info=null;
+    p._info=null;
+    if(!nm){ MAP.neutral.push(p); svg.appendChild(p); continue; }   // unnamed (disputed) areas: drawn neutral, never attributed to a country
+    (MAP.paths[num] || (MAP.paths[num]=[])).push(p);
+    if(!MAP.name[num]) MAP.name[num]=nm;   // first named feature names the group (Spain, not Canary Islands)
+    p._name=MAP.name[num];
     p.addEventListener("mousemove",ev=>{ if(!p._name || panState.active) return;
       const c=p._info; let t=p._name;
       if(state.mapMode==="participants"){ t+= c ? (" \u2014 "+c.participants+" participants (demo)") : " \u2014 no data"; }
@@ -1152,16 +1165,16 @@ function paintMap(){
     const counts=participantCounts();
     const max=Math.max(1,...Object.values(counts));
     MAP.eventsByNum={};
-    for(const num in MAP.paths){ const p=MAP.paths[num], n=counts[num]||0; p._info=n?{participants:n}:null;
+    for(const num in MAP.paths){ const n=counts[num]||0; for(const p of MAP.paths[num]){ p._info=n?{participants:n}:null;
       p.setAttribute("fill", n?colorFor(n,max):"#e9eef5");
-      p.setAttribute("class","country"+(p._name?" hostable":"")); }
+      p.setAttribute("class","country"+(p._name?" hostable":"")); } }
   } else {
     const cat=mapCounts();
     MAP.eventsByNum={}; for(const n in cat) MAP.eventsByNum[n]=cat[n].events;
     const max=Math.max(1,...Object.keys(cat).map(n=>cat[n].events.length));
-    for(const num in MAP.paths){ const p=MAP.paths[num], c=cat[num]||null; p._info=c;
+    for(const num in MAP.paths){ const c=cat[num]||null; for(const p of MAP.paths[num]){ p._info=c;
       p.setAttribute("fill", c?colorFor(c.events.length,max):"#e9eef5");
-      p.setAttribute("class","country"+(p._name?" hostable":"")+(c?" haslist":"")+(+num===state.mapSel?" sel":"")); }
+      p.setAttribute("class","country"+(p._name?" hostable":"")+(c?" haslist":"")+(+num===state.mapSel?" sel":"")); } }
   }
   updateMapText(mode);
   if(mode==="host" && state.mapSel!=null) showCountryDetail(state.mapSel); else clearDetail(mode);
