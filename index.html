@@ -1056,7 +1056,7 @@ function projRing(r){
     if(Math.abs(b[0]-a[0])>180){
       const aE=a[0]>0?180:-180;
       const bUn=b[0]+(a[0]>0?360:-360);          // unwrap b onto a's side
-      const t=(aE-a[0])/(bUn-a[0]);
+      const t=(bUn===a[0]) ? 0 : (aE-a[0])/(bUn-a[0]);   // a already on ±180: avoid 0/0 (NaN in Antarctica)
       const lat=a[1]+t*(b[1]-a[1]);              // latitude where it crosses ±180
       cur.push([aE,lat]); arcs.push(cur);
       cur=[[a[0]>0?-180:180, lat], b];
