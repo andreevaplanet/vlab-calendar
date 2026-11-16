@@ -1,13 +1,9 @@
 name: Update VLab events feed
 
-# Mirrors the public EUMETSAT / VLab training-events feed into events.xml in this
-# repository, so the calendar (index.html, PROXY_URL:"events.xml") can read it
-# same-origin on GitHub Pages. GitHub fetches it server-side, so there is no CORS issue.
-
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (UTC, best-effort). See notes below.
-  workflow_dispatch:          # lets you run it manually from the Actions tab
+    - cron: "*/30 * * * *"    # every 30 minutes (UTC, best-effort)
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,12 +16,34 @@ jobs:
 
       - name: Download the EUMETSAT feed
         run: |
-          curl -fsSL \
-            "https://trainingevents.eumetsat.int/trapi/resources/public/events" \
-            -o events.xml
-          # quick sanity check: file should be non-empty and look like XML
-          test -s events.xml
-          head -c 200 events.xml
+          # Download to a temp file first; only replace events.xml if the
+          # response is present AND valid, so a bad fetch can never break
+          # the calendar (the last good events.xml is kept on any failure).
+          curl -sS -L \
+            --connect-timeout 30 --max-time 120 \
+            --retry 5 --retry-delay 15 --retry-all-errors --fail \
+            -A "Mozilla/5.0 (compatible; VLabCalendarBot/1.0; +https://andreevaplanet.github.io/vlab-calendar/)" \
+            -H "Accept: application/json, application/xml;q=0.9, */*;q=0.8" \
+            -o events.new \
+            "https://trainingevents.eumetsat.int/trapi/resources/public/events"
+
+          if [ ! -s events.new ]; then
+            echo "::error::Empty response from the feed"; exit 1
+          fi
+
+          first=$(head -c1 events.new)
+          if printf '%s' "$first" | grep -q '[][{]'; then
+            python3 -c "import json; json.load(open('events.new'))" \
+              || { echo "::error::Response is not valid JSON"; head -c 300 events.new; exit 1; }
+          elif [ "$first" = "<" ]; then
+            python3 -c "import xml.dom.minidom as m; m.parse('events.new')" \
+              || { echo "::error::Response is not valid XML"; head -c 300 events.new; exit 1; }
+          else
+            echo "::error::Unexpected content (not JSON or XML):"; head -c 300 events.new; exit 1
+          fi
+
+          mv events.new events.xml
+          echo "Fetched $(wc -c < events.xml) bytes OK"
 
       - name: Commit the update (only if it changed)
         run: |
